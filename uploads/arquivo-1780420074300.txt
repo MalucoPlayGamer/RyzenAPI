@@ -1,0 +1,1 @@
+Olá GitHub! Este arquivo foi criado de forma automática pela minha API no Cloudflare Workers.
