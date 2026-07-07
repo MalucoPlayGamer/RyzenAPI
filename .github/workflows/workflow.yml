@@ -1,0 +1,177 @@
+name: Sync & Patch ZIPs
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      full_sync:
+        description: 'Forzar re-parcheo de todos los ZIPs'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-patch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore last SHA
+        id: cache-sha
+        uses: actions/cache@v4
+        with:
+          path: .last_sha
+          key: last-upstream-sha
+
+      - name: Check upstream for new commits
+        id: check
+        env:
+          UPSTREAM_OWNER: skyflarefox
+          UPSTREAM_REPO: Skyapi
+        run: |
+          UPSTREAM_SHA=$(curl -sf \
+            "https://api.github.com/repos/$UPSTREAM_OWNER/$UPSTREAM_REPO/commits/main" \
+            | jq -r '.sha')
+
+          LAST_SHA=$(cat .last_sha 2>/dev/null || echo "")
+
+          echo "upstream=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
+          echo "last=$LAST_SHA"         >> $GITHUB_OUTPUT
+
+          echo "SHA upstream:  $UPSTREAM_SHA"
+          echo "SHA guardado:  $LAST_SHA"
+
+          if [ "$UPSTREAM_SHA" != "$LAST_SHA" ] || [ "${{ inputs.full_sync }}" = "true" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "✓ Hay cambios, continuando..."
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "Sin cambios, saliendo."
+          fi
+
+      - name: Sync fork with upstream
+        if: steps.check.outputs.changed == 'true'
+        env:
+          UPSTREAM_OWNER: skyflarefox
+          UPSTREAM_REPO: Skyapi
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/$UPSTREAM_OWNER/$UPSTREAM_REPO.git"
+
+          echo "Fetching upstream..."
+          git fetch upstream main
+
+          echo "Mergeando..."
+          git merge upstream/main --ff-only || git merge upstream/main --no-edit
+          echo "✓ Fork sincronizado"
+
+      - name: Detect changed ZIPs
+        if: steps.check.outputs.changed == 'true'
+        id: zips
+        run: |
+          LAST="${{ steps.check.outputs.last }}"
+          FULL="${{ inputs.full_sync }}"
+
+          if [ -z "$LAST" ] || [ "$FULL" = "true" ]; then
+            echo "Modo: sync completo"
+            find . -name "*.zip" -not -path "./.git/*" > /tmp/changed_zips.txt
+          else
+            echo "Modo: sync incremental"
+            git diff --name-only --diff-filter=ACM "$LAST" HEAD \
+              | grep '\.zip$' > /tmp/changed_zips.txt || true
+          fi
+
+          COUNT=$(wc -l < /tmp/changed_zips.txt)
+          echo "==============================="
+          echo "ZIPs a procesar: $COUNT"
+          echo "==============================="
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Patch LUA inside ZIPs
+        if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
+        run: |
+          TOTAL=$(wc -l < /tmp/changed_zips.txt)
+          COUNT=0
+          UPDATED=0
+
+          # Salva o caminho absoluto do diretório atual do repositório
+          REPO_DIR=$(pwd)
+
+          while IFS= read -r zipfile; do
+            [ -z "$zipfile" ] && continue
+
+            COUNT=$((COUNT + 1))
+            echo "[$COUNT/$TOTAL] Procesando zip: $zipfile"
+
+            # Cria um diretório temporário isolado para descompactar
+            tmpdir=$(mktemp -d)
+            unzip -q "$zipfile" -d "$tmpdir"
+
+            # Procura o arquivo .lua lá dentro
+            luafile=$(find "$tmpdir" -name "*.lua" | head -1)
+            if [ -z "$luafile" ]; then
+              echo "  ⚠ Sin archivo .lua dentro, saltando..."
+              rm -rf "$tmpdir"
+              continue
+            fi
+
+            # Aplica o patch no arquivo .lua
+            sed -i 's/^\(setManifestid(.*)\)/-- \1/' "$luafile"
+            echo "  ✓ Archivo .lua parcheado"
+
+            # Atualiza/Recria o ZIP substituindo o original no mesmo caminho
+            # Entramos na pasta temporária para o ZIP não herdar caminhos absolutos ruins
+            cd "$tmpdir"
+            zip -q -r "$REPO_DIR/$zipfile" .
+            cd "$REPO_DIR"
+
+            # Limpa a pasta temporária
+            rm -rf "$tmpdir"
+            UPDATED=$((UPDATED + 1))
+            echo "  ✓ ZIP actualizado correctamente"
+
+          done < /tmp/changed_zips.txt
+
+          echo ""
+          echo "==============================="
+          echo "Total ZIPs detectados: $TOTAL"
+          echo "ZIPs actualizados:     $UPDATED"
+          echo "==============================="
+
+      - name: Commit & Push updated ZIPs
+        if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Adiciona apenas as alterações nos arquivos .zip
+          git add *.zip || git add .
+
+          STAGED=$(git diff --cached --name-only | grep '\.zip$' | wc -l || echo "0")
+          echo "ZIPs modificados listos para commit: $STAGED"
+
+          if [ "$STAGED" -gt 0 ]; then
+            git commit -m "sync: patch interno de LUAs en ($STAGED) archivos ZIP"
+            
+            # Pega o nome da branch atual de forma dinâmica (ex: main)
+            CURRENT_BRANCH=$(git branch --show-current)
+            echo "Pusheando cambios a la rama $CURRENT_BRANCH..."
+            git push origin "$CURRENT_BRANCH"
+          else
+            echo "No se detectaron cambios reales en los ZIPs."
+          fi
+
+      - name: Save new SHA to cache
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          echo "${{ steps.check.outputs.upstream }}" > .last_sha
+          echo "✓ SHA guardado en caché"
