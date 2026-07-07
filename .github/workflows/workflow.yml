@@ -143,7 +143,7 @@ jobs:
           echo "Total de ZIPs modificados/novos para enviar: $STAGED"
 
           if [ "$STAGED" -gt 0 ]; then
-            git commit -m "bot: sincronizado com skyflarefox e aplicado patch nos arquivos LUA"
+            git commit -m "bot: Arquivos Atualizados/Adicionados"
             CURRENT_BRANCH=$(git branch --show-current)
             git push origin "$CURRENT_BRANCH"
             echo "✓ Alterações enviadas com sucesso!"
