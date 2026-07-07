@@ -1,8 +1,8 @@
-name: Sync & Patch ZIPs
+name: Fetch Upstream & Patch ZIPs
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/30 * * * *' # Checa se há atualizações a cada 30 minutos
   workflow_dispatch:
     inputs:
       full_sync:
@@ -18,25 +18,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout fork
+      - name: Checkout seu repositório
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Restore last SHA
+      - name: Restaurar último commit do Skyflare
         id: cache-sha
         uses: actions/cache@v4
         with:
           path: .last_sha
           key: last-upstream-sha
 
-      - name: Check upstream for new commits
+      - name: Checar se o Skyflare postou algo novo
         id: check
         env:
           UPSTREAM_OWNER: skyflarefox
           UPSTREAM_REPO: Skyapi
         run: |
+          # Pega o SHA do último commit do Skyflare via API do GitHub
           UPSTREAM_SHA=$(curl -sf \
             "https://api.github.com/repos/$UPSTREAM_OWNER/$UPSTREAM_REPO/commits/main" \
             | jq -r '.sha')
@@ -46,122 +47,112 @@ jobs:
           echo "upstream=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
           echo "last=$LAST_SHA"         >> $GITHUB_OUTPUT
 
-          echo "SHA upstream:  $UPSTREAM_SHA"
-          echo "SHA guardado:  $LAST_SHA"
+          echo "Último commit do Skyflare:  $UPSTREAM_SHA"
+          echo "Último que processamos:      $LAST_SHA"
 
           if [ "$UPSTREAM_SHA" != "$LAST_SHA" ] || [ "${{ inputs.full_sync }}" = "true" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "✓ Hay cambios, continuando..."
+            echo "✓ Há atualizações no repositório do Skyflare!"
           else
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "Sin cambios, saliendo."
+            echo "Sem novidades no Skyflare. Parando por aqui."
           fi
 
-      - name: Sync fork with upstream
+      - name: Baixar arquivos novos do Skyflare
         if: steps.check.outputs.changed == 'true'
         env:
           UPSTREAM_OWNER: skyflarefox
           UPSTREAM_REPO: Skyapi
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "https://github.com/$UPSTREAM_OWNER/$UPSTREAM_REPO.git"
+          echo "Baixando o repositório do Skyflare via ZIP temporário..."
+          # Baixa o código dele sem clonar o git, para não quebrar o seu histórico
+          curl -sL "https://github.com/$UPSTREAM_OWNER/$UPSTREAM_REPO/archive/refs/heads/main.zip" -o /tmp/upstream.zip
+          
+          echo "Extraindo arquivos do Skyflare..."
+          mkdir /tmp/upstream_files
+          unzip -q /tmp/upstream.zip -d /tmp/upstream_files
+          
+          echo "Copiando novos arquivos ZIP para o seu repositório..."
+          # Copia todos os .zip mantendo a estrutura de pastas, ignorando o que for do git
+          rsync -av --include='*/' --include='*.zip' --exclude='*' /tmp/upstream_files/Skyapi-main/ ./
+          
+          echo "✓ Arquivos atualizados com sucesso no seu espaço local!"
 
-          echo "Fetching upstream..."
-          git fetch upstream main
-
-          echo "Mergeando..."
-          git merge upstream/main --ff-only || git merge upstream/main --no-edit
-          echo "✓ Fork sincronizado"
-
-      - name: Detect changed ZIPs
+      - name: Detectar ZIPs para aplicar o Patch
         if: steps.check.outputs.changed == 'true'
         id: zips
         run: |
-          LAST="${{ steps.check.outputs.last }}"
-          FULL="${{ inputs.full_sync }}"
-
-          if [ -z "$LAST" ] || [ "$FULL" = "true" ]; then
-            echo "Modo: sync completo"
-            find . -name "*.zip" -not -path "./.git/*" > /tmp/changed_zips.txt
-          else
-            echo "Modo: sync incremental"
-            git diff --name-only --diff-filter=ACM "$LAST" HEAD \
-              | grep '\.zip$' > /tmp/changed_zips.txt || true
-          fi
+          # Procura todos os arquivos ZIP que agora estão no seu repositório
+          find . -name "*.zip" -not -path "./.git/*" > /tmp/changed_zips.txt
 
           COUNT=$(wc -l < /tmp/changed_zips.txt)
           echo "==============================="
-          echo "ZIPs a procesar: $COUNT"
+          echo "ZIPs prontos para processar: $COUNT"
           echo "==============================="
           echo "count=$COUNT" >> $GITHUB_OUTPUT
 
-      - name: Patch LUA inside ZIPs
+      - name: Modificar LUA dentro dos ZIPs
         if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
         run: |
           TOTAL=$(wc -l < /tmp/changed_zips.txt)
           COUNT=0
           UPDATED=0
-
           REPO_DIR=$(pwd)
 
           while IFS= read -r zipfile; do
             [ -z "$zipfile" ] && continue
 
             COUNT=$((COUNT + 1))
-            echo "[$COUNT/$TOTAL] Procesando zip: $zipfile"
+            echo "[$COUNT/$TOTAL] Modificando ZIP: $zipfile"
 
             tmpdir=$(mktemp -d)
             unzip -q "$zipfile" -d "$tmpdir"
 
             luafile=$(find "$tmpdir" -name "*.lua" | head -1)
             if [ -z "$luafile" ]; then
-              echo "  ⚠ Sin archivo .lua dentro, saltando..."
+              echo "  ⚠ Nenhum arquivo .lua dentro deste ZIP, pulando..."
               rm -rf "$tmpdir"
               continue
             fi
 
+            # Aplica o patch comentando a linha do setManifestid
             sed -i 's/^\(setManifestid(.*)\)/-- \1/' "$luafile"
-            echo "  ✓ Archivo .lua parcheado"
+            echo "  ✓ Arquivo .lua modificado"
 
+            # Recria o ZIP substituindo o antigo
             cd "$tmpdir"
             zip -q -r "$REPO_DIR/$zipfile" .
             cd "$REPO_DIR"
 
             rm -rf "$tmpdir"
             UPDATED=$((UPDATED + 1))
-            echo "  ✓ ZIP actualizado correctamente"
+            echo "  ✓ ZIP atualizado"
 
           done < /tmp/changed_zips.txt
 
-          echo ""
-          echo "==============================="
-          echo "Total ZIPs detectados: $TOTAL"
-          echo "ZIPs actualizados:     $UPDATED"
-          echo "==============================="
-
-      - name: Commit & Push updated ZIPs
+      - name: Enviar modificações para o seu GitHub
         if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add *.zip || git add .
+          # Adiciona as alterações (Zips novos vindo do skyflare + seus zips patcheados)
+          git add .
 
           STAGED=$(git diff --cached --name-only | grep '\.zip$' | wc -l || echo "0")
-          echo "ZIPs modificados listos para commit: $STAGED"
+          echo "Total de ZIPs modificados/novos para enviar: $STAGED"
 
           if [ "$STAGED" -gt 0 ]; then
-            git commit -m "sync: patch interno de LUAs en ($STAGED) archivos ZIP"
+            git commit -m "bot: sincronizado com skyflarefox e aplicado patch nos arquivos LUA"
             CURRENT_BRANCH=$(git branch --show-current)
-            echo "Pusheando cambios a la rama $CURRENT_BRANCH..."
             git push origin "$CURRENT_BRANCH"
+            echo "✓ Alterações enviadas com sucesso!"
           else
-            echo "No se detectaron cambios reales en los ZIPs."
+            echo "Nenhuma mudança real detectada nos arquivos."
           fi
 
-      - name: Save new SHA to cache
+      - name: Salvar registro do último commit processado
         if: steps.check.outputs.changed == 'true'
         run: |
           echo "${{ steps.check.outputs.upstream }}" > .last_sha
-          echo "✓ SHA guardado en caché"
+          echo "✓ Registro atualizado no cache"
