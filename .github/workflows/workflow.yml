@@ -37,7 +37,6 @@ jobs:
           UPSTREAM_OWNER: skyflarefox
           UPSTREAM_REPO: Skyapi
         run: |
-          # Pega o SHA do último commit do Skyflare via API do GitHub
           UPSTREAM_SHA=$(curl -sf \
             "https://api.github.com/repos/$UPSTREAM_OWNER/$UPSTREAM_REPO/commits/main" \
             | jq -r '.sha')
@@ -65,7 +64,6 @@ jobs:
           UPSTREAM_REPO: Skyapi
         run: |
           echo "Baixando o repositório do Skyflare via ZIP temporário..."
-          # Baixa o código dele sem clonar o git, para não quebrar o seu histórico
           curl -sL "https://github.com/$UPSTREAM_OWNER/$UPSTREAM_REPO/archive/refs/heads/main.zip" -o /tmp/upstream.zip
           
           echo "Extraindo arquivos do Skyflare..."
@@ -73,7 +71,6 @@ jobs:
           unzip -q /tmp/upstream.zip -d /tmp/upstream_files
           
           echo "Copiando novos arquivos ZIP para o seu repositório..."
-          # Copia todos os .zip mantendo a estrutura de pastas, ignorando o que for do git
           rsync -av --include='*/' --include='*.zip' --exclude='*' /tmp/upstream_files/Skyapi-main/ ./
           
           echo "✓ Arquivos atualizados com sucesso no seu espaço local!"
@@ -82,7 +79,6 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         id: zips
         run: |
-          # Procura todos os arquivos ZIP que agora estão no seu repositório
           find . -name "*.zip" -not -path "./.git/*" > /tmp/changed_zips.txt
 
           COUNT=$(wc -l < /tmp/changed_zips.txt)
@@ -115,9 +111,13 @@ jobs:
               continue
             fi
 
-            # Aplica o patch comentando a linha do setManifestid
+            # 1. Comenta a linha do setManifestid (sua regra antiga)
             sed -i 's/^\(setManifestid(.*)\)/-- \1/' "$luafile"
-            echo "  ✓ Arquivo .lua modificado"
+            echo "  ✓ Linha setManifestid comentada"
+
+            # 2. Substitui 'SkyAPI' por 'RyzenAPI' em qualquer lugar do arquivo
+            sed -i 's/SkyAPI/RyzenAPI/g' "$luafile"
+            echo "  ✓ Texto SkyAPI alterado para RyzenAPI"
 
             # Recria o ZIP substituindo o antigo
             cd "$tmpdir"
@@ -126,7 +126,7 @@ jobs:
 
             rm -rf "$tmpdir"
             UPDATED=$((UPDATED + 1))
-            echo "  ✓ ZIP atualizado"
+            echo "  ✓ ZIP atualizado com sucesso"
 
           done < /tmp/changed_zips.txt
 
@@ -136,14 +136,13 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Adiciona as alterações (Zips novos vindo do skyflare + seus zips patcheados)
           git add .
 
           STAGED=$(git diff --cached --name-only | grep '\.zip$' | wc -l || echo "0")
           echo "Total de ZIPs modificados/novos para enviar: $STAGED"
 
           if [ "$STAGED" -gt 0 ]; then
-            git commit -m "bot: Arquivos Atualizados/Adicionados"
+            git commit -m "bot: aplicado patch nos arquivos LUA (Removido setManifestid & Mudado para RyzenAPI)"
             CURRENT_BRANCH=$(git branch --show-current)
             git push origin "$CURRENT_BRANCH"
             echo "✓ Alterações enviadas com sucesso!"
