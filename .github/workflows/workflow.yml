@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout fork
-        uses: actions/actions/checkout@v4
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -103,7 +103,6 @@ jobs:
           COUNT=0
           UPDATED=0
 
-          # Salva o caminho absoluto do diretório atual do repositório
           REPO_DIR=$(pwd)
 
           while IFS= read -r zipfile; do
@@ -112,11 +111,9 @@ jobs:
             COUNT=$((COUNT + 1))
             echo "[$COUNT/$TOTAL] Procesando zip: $zipfile"
 
-            # Cria um diretório temporário isolado para descompactar
             tmpdir=$(mktemp -d)
             unzip -q "$zipfile" -d "$tmpdir"
 
-            # Procura o arquivo .lua lá dentro
             luafile=$(find "$tmpdir" -name "*.lua" | head -1)
             if [ -z "$luafile" ]; then
               echo "  ⚠ Sin archivo .lua dentro, saltando..."
@@ -124,17 +121,13 @@ jobs:
               continue
             fi
 
-            # Aplica o patch no arquivo .lua
             sed -i 's/^\(setManifestid(.*)\)/-- \1/' "$luafile"
             echo "  ✓ Archivo .lua parcheado"
 
-            # Atualiza/Recria o ZIP substituindo o original no mesmo caminho
-            # Entramos na pasta temporária para o ZIP não herdar caminhos absolutos ruins
             cd "$tmpdir"
             zip -q -r "$REPO_DIR/$zipfile" .
             cd "$REPO_DIR"
 
-            # Limpa a pasta temporária
             rm -rf "$tmpdir"
             UPDATED=$((UPDATED + 1))
             echo "  ✓ ZIP actualizado correctamente"
@@ -153,7 +146,6 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Adiciona apenas as alterações nos arquivos .zip
           git add *.zip || git add .
 
           STAGED=$(git diff --cached --name-only | grep '\.zip$' | wc -l || echo "0")
@@ -161,8 +153,6 @@ jobs:
 
           if [ "$STAGED" -gt 0 ]; then
             git commit -m "sync: patch interno de LUAs en ($STAGED) archivos ZIP"
-            
-            # Pega o nome da branch atual de forma dinâmica (ex: main)
             CURRENT_BRANCH=$(git branch --show-current)
             echo "Pusheando cambios a la rama $CURRENT_BRANCH..."
             git push origin "$CURRENT_BRANCH"
