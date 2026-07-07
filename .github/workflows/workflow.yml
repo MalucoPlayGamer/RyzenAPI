@@ -52,12 +52,13 @@ jobs:
           echo "Último commit do Skyflare:  $UPSTREAM_SHA"
           echo "Último que processamos:      $LAST_SHA"
 
-          if [ "$UPSTREAM_SHA" != "$LAST_SHA" ] || [ "${{ inputs.full_sync }}" = "true" ]; then
+          # CORREÇÃO: Se você deu um PUSH manual ou ativou o full_sync, força 'changed=true'
+          if [ "${{ github.event_name }}" = "push" ] || [ "$UPSTREAM_SHA" != "$LAST_SHA" ] || [ "${{ inputs.full_sync }}" = "true" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "✓ Há atualizações no repositório do Skyflare!"
+            echo "✓ Executando patch (Motivo: Atualização detectada ou Push manual)!"
           else
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "Sem novidades no Skyflare. Parando por aqui."
+            echo "Sem novidades no Skyflare e nenhum arquivo novo upado. Parando por aqui."
           fi
 
       - name: Baixar e Comparar por Data os arquivos do Skyflare
