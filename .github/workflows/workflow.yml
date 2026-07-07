@@ -1,8 +1,11 @@
 name: Fetch Upstream & Patch ZIPs
 
 on:
+  push:
+    branches:
+      - main
   schedule:
-    - cron: '*/30 * * * *' # Checa se há atualizações a cada 30 minutos
+    - cron: '*/30 * * * *' # Checa se há atualizações a cada 30 minutes
   workflow_dispatch:
     inputs:
       full_sync:
@@ -115,9 +118,31 @@ jobs:
             sed -i 's/^\(setManifestid(.*)\)/-- \1/' "$luafile"
             echo "  ✓ Linha setManifestid comentada"
 
-            # 2. Substitui 'SkyAPI' por 'RyzenAPI' em qualquer lugar do arquivo
+            # 2. Substitui 'SkyAPI' por 'RyzenAPI' caso já estivesse no formato antigo
             sed -i 's/SkyAPI/RyzenAPI/g' "$luafile"
-            echo "  ✓ Texto SkyAPI alterado para RyzenAPI"
+
+            # 3. Formata o cabeçalho se ele for do tipo "Hubcap Manifest"
+            if grep -q "Hubcap Manifest" "$luafile"; then
+              echo "  ℹ Detectado cabeçalho antigo do Hubcap. Formatando..."
+              
+              # Extrai o nome do jogo procurando a linha que contém o padrão do Hubcap
+              GAMENAME=$(grep -E "^-- " "$luafile" | head -2 | tail -1 | sed 's/^-- //')
+              
+              # Se por acaso a extração falhar ou o padrão mudar, tenta pegar o comentário da linha do addappid
+              if [[ "$GAMENAME" == *"Created by"* || -z "$GAMENAME" ]]; then
+                GAMENAME=$(grep "addappid" "$luafile" | head -1 | awk -F'-- ' '{print $2}')
+              fi
+              
+              # Remove todos os comentários iniciais antigos do Hubcap (limpa até chegar no MAIN APPLICATION)
+              sed -i '/^-- /d' "$luafile"
+              
+              # Cria o novo cabeçalho limpo no formato RyzenAPI
+              NEW_HEADER="-- Lua provided by RyzenAPI\n-- Game: ${GAMENAME:-Jogo Desconhecido}"
+              
+              # Injeta o novo cabeçalho de volta no topo do arquivo .lua
+              sed -i "1s/^/${NEW_HEADER}\n\n/" "$luafile"
+              echo "  ✓ Novo cabeçalho formatado para RyzenAPI"
+            fi
 
             # Recria o ZIP substituindo o antigo
             cd "$tmpdir"
@@ -142,7 +167,7 @@ jobs:
           echo "Total de ZIPs modificados/novos para enviar: $STAGED"
 
           if [ "$STAGED" -gt 0 ]; then
-            git commit -m "bot: aplicado patch nos arquivos LUA (Removido setManifestid & Mudado para RyzenAPI)"
+            git commit -m "bot: patch e padronização de cabeçalhos LUA efetuada para RyzenAPI"
             CURRENT_BRANCH=$(git branch --show-current)
             git push origin "$CURRENT_BRANCH"
             echo "✓ Alterações enviadas com sucesso!"
