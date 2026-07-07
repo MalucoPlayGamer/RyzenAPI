@@ -5,7 +5,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '*/30 * * * *' # Checa se há atualizações a cada 30 minutes
+    - cron: '*/30 * * * *' # Checa se há atualizações a cada 30 minutos
   workflow_dispatch:
     inputs:
       full_sync:
@@ -60,7 +60,7 @@ jobs:
             echo "Sem novidades no Skyflare. Parando por aqui."
           fi
 
-      - name: Baixar arquivos novos do Skyflare
+      - name: Baixar e Comparar por Data os arquivos do Skyflare
         if: steps.check.outputs.changed == 'true'
         env:
           UPSTREAM_OWNER: skyflarefox
@@ -73,10 +73,37 @@ jobs:
           mkdir /tmp/upstream_files
           unzip -q /tmp/upstream.zip -d /tmp/upstream_files
           
-          echo "Copiando novos arquivos ZIP para o seu repositório..."
-          rsync -av --include='*/' --include='*.zip' --exclude='*' /tmp/upstream_files/Skyapi-main/ ./
+          echo "Comparando arquivos por data de modificação..."
+          # Mapeia a pasta extraída do Skyflare
+          SOURCE_DIR="/tmp/upstream_files/Skyapi-main"
           
-          echo "✓ Arquivos atualizados com sucesso no seu espaço local!"
+          # Preserva as datas originais dos commits do Skyflare usando os dados extraídos do zip
+          # Varre todos os arquivos .zip vindos do repositório dele
+          find "$SOURCE_DIR" -name "*.zip" | while read -r upstream_zip; do
+            # Descobre o caminho relativo dele no seu repositório local
+            rel_path="${upstream_zip#$SOURCE_DIR/}"
+            local_zip="./$rel_path"
+            
+            # Se o arquivo não existir localmente no seu repositório, copia direto
+            if [ ! -f "$local_zip" ]; then
+              echo "  ➔ Arquivo novo detectado no Skyflare: $rel_path (Copiando)"
+              mkdir -p "$(dirname "$local_zip")"
+              cp "$upstream_zip" "$local_zip"
+            else
+              # Se o arquivo existir em ambos, compara as datas de modificação (mtime em segundos)
+              upstream_time=$(stat -c %Y "$upstream_zip")
+              local_time=$(stat -c %Y "$local_zip")
+              
+              if [ "$upstream_time" -gt "$local_time" ]; then
+                echo "  ➔ O arquivo do Skyflare é MAIS NOVO: $rel_path (Atualizando)"
+                cp "$upstream_zip" "$local_zip"
+              else
+                echo "  ➔ O SEU arquivo manual é mais recente ou igual: $rel_path (Mantendo o seu)"
+              fi
+            fi
+          done
+          
+          echo "✓ Sincronização inteligente por data concluída!"
 
       - name: Detectar ZIPs para aplicar o Patch
         if: steps.check.outputs.changed == 'true'
@@ -114,32 +141,22 @@ jobs:
               continue
             fi
 
-            # 1. Comenta a linha do setManifestid (sua regra antiga)
+            # 1. Comenta a linha do setManifestid
             sed -i 's/^\(setManifestid(.*)\)/-- \1/' "$luafile"
             echo "  ✓ Linha setManifestid comentada"
 
-            # 2. Substitui 'SkyAPI' por 'RyzenAPI' caso já estivesse no formato antigo
+            # 2. Substitui 'SkyAPI' por 'RyzenAPI'
             sed -i 's/SkyAPI/RyzenAPI/g' "$luafile"
 
-            # 3. Formata o cabeçalho se ele for do tipo "Hubcap Manifest"
+            # 3. Formata o cabeçalho se for "Hubcap Manifest"
             if grep -q "Hubcap Manifest" "$luafile"; then
               echo "  ℹ Detectado cabeçalho antigo do Hubcap. Formatando..."
-              
-              # Extrai o nome do jogo procurando a linha que contém o padrão do Hubcap
               GAMENAME=$(grep -E "^-- " "$luafile" | head -2 | tail -1 | sed 's/^-- //')
-              
-              # Se por acaso a extração falhar ou o padrão mudar, tenta pegar o comentário da linha do addappid
               if [[ "$GAMENAME" == *"Created by"* || -z "$GAMENAME" ]]; then
                 GAMENAME=$(grep "addappid" "$luafile" | head -1 | awk -F'-- ' '{print $2}')
               fi
-              
-              # Remove todos os comentários iniciais antigos do Hubcap (limpa até chegar no MAIN APPLICATION)
               sed -i '/^-- /d' "$luafile"
-              
-              # Cria o novo cabeçalho limpo no formato RyzenAPI
               NEW_HEADER="-- Lua provided by RyzenAPI\n-- Game: ${GAMENAME:-Jogo Desconhecido}"
-              
-              # Injeta o novo cabeçalho de volta no topo do arquivo .lua
               sed -i "1s/^/${NEW_HEADER}\n\n/" "$luafile"
               echo "  ✓ Novo cabeçalho formatado para RyzenAPI"
             fi
@@ -167,12 +184,12 @@ jobs:
           echo "Total de ZIPs modificados/novos para enviar: $STAGED"
 
           if [ "$STAGED" -gt 0 ]; then
-            git commit -m "bot: patch e padronização de cabeçalhos LUA efetuada para RyzenAPI"
+            git commit -m "bot: sincronização por data e padronização LUA efetuada para RyzenAPI"
             CURRENT_BRANCH=$(git branch --show-current)
             git push origin "$CURRENT_BRANCH"
             echo "✓ Alterações enviadas com sucesso!"
           else
-            echo "Nenhuma mudança real detectada nos arquivos."
+            echo "Nenhuma mudança nova detectada nos arquivos."
           fi
 
       - name: Salvar registro do último commit processado
