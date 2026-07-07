@@ -52,16 +52,16 @@ jobs:
           echo "Último commit do Skyflare:  $UPSTREAM_SHA"
           echo "Último que processamos:      $LAST_SHA"
 
-          # CORREÇÃO: Se você deu um PUSH manual ou ativou o full_sync, força 'changed=true'
+          # Executa se for push seu, se o Skyflare mudou algo, ou se disparado manualmente
           if [ "${{ github.event_name }}" = "push" ] || [ "$UPSTREAM_SHA" != "$LAST_SHA" ] || [ "${{ inputs.full_sync }}" = "true" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "✓ Executando patch (Motivo: Atualização detectada ou Push manual)!"
+            echo "✓ Executando atualização de patches!"
           else
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "Sem novidades no Skyflare e nenhum arquivo novo upado. Parando por aqui."
+            echo "Sem novidades para processar."
           fi
 
-      - name: Baixar e Comparar por Data os arquivos do Skyflare
+      - name: Baixar arquivos novos do Skyflare
         if: steps.check.outputs.changed == 'true'
         env:
           UPSTREAM_OWNER: skyflarefox
@@ -74,43 +74,32 @@ jobs:
           mkdir /tmp/upstream_files
           unzip -q /tmp/upstream.zip -d /tmp/upstream_files
           
-          echo "Comparando arquivos por data de modificação..."
-          # Mapeia a pasta extraída do Skyflare
+          echo "Copiando novos arquivos ZIP (sem apagar os seus modificados por data)..."
           SOURCE_DIR="/tmp/upstream_files/Skyapi-main"
           
-          # Preserva as datas originais dos commits do Skyflare usando os dados extraídos do zip
-          # Varre todos os arquivos .zip vindos do repositório dele
+          # Varre apenas os arquivos .zip vindos do Skyflare
           find "$SOURCE_DIR" -name "*.zip" | while read -r upstream_zip; do
-            # Descobre o caminho relativo dele no seu repositório local
             rel_path="${upstream_zip#$SOURCE_DIR/}"
             local_zip="./$rel_path"
             
-            # Se o arquivo não existir localmente no seu repositório, copia direto
             if [ ! -f "$local_zip" ]; then
-              echo "  ➔ Arquivo novo detectado no Skyflare: $rel_path (Copiando)"
               mkdir -p "$(dirname "$local_zip")"
               cp "$upstream_zip" "$local_zip"
             else
-              # Se o arquivo existir em ambos, compara as datas de modificação (mtime em segundos)
               upstream_time=$(stat -c %Y "$upstream_zip")
               local_time=$(stat -c %Y "$local_zip")
-              
               if [ "$upstream_time" -gt "$local_time" ]; then
-                echo "  ➔ O arquivo do Skyflare é MAIS NOVO: $rel_path (Atualizando)"
                 cp "$upstream_zip" "$local_zip"
-              else
-                echo "  ➔ O SEU arquivo manual é mais recente ou igual: $rel_path (Mantendo o seu)"
               fi
             fi
           done
-          
-          echo "✓ Sincronização inteligente por data concluída!"
 
       - name: Detectar ZIPs para aplicar o Patch
         if: steps.check.outputs.changed == 'true'
         id: zips
         run: |
-          find . -name "*.zip" -not -path "./.git/*" > /tmp/changed_zips.txt
+          # Garante estritamente que APENAS arquivos .zip entrem na lista de modificações
+          find . -maxdepth 2 -name "*.zip" -not -path "./.git/*" > /tmp/changed_zips.txt
 
           COUNT=$(wc -l < /tmp/changed_zips.txt)
           echo "==============================="
@@ -123,7 +112,6 @@ jobs:
         run: |
           TOTAL=$(wc -l < /tmp/changed_zips.txt)
           COUNT=0
-          UPDATED=0
           REPO_DIR=$(pwd)
 
           while IFS= read -r zipfile; do
@@ -137,21 +125,18 @@ jobs:
 
             luafile=$(find "$tmpdir" -name "*.lua" | head -1)
             if [ -z "$luafile" ]; then
-              echo "  ⚠ Nenhum arquivo .lua dentro deste ZIP, pulando..."
               rm -rf "$tmpdir"
               continue
             fi
 
             # 1. Comenta a linha do setManifestid
             sed -i 's/^\(setManifestid(.*)\)/-- \1/' "$luafile"
-            echo "  ✓ Linha setManifestid comentada"
 
             # 2. Substitui 'SkyAPI' por 'RyzenAPI'
             sed -i 's/SkyAPI/RyzenAPI/g' "$luafile"
 
             # 3. Formata o cabeçalho se for "Hubcap Manifest"
             if grep -q "Hubcap Manifest" "$luafile"; then
-              echo "  ℹ Detectado cabeçalho antigo do Hubcap. Formatando..."
               GAMENAME=$(grep -E "^-- " "$luafile" | head -2 | tail -1 | sed 's/^-- //')
               if [[ "$GAMENAME" == *"Created by"* || -z "$GAMENAME" ]]; then
                 GAMENAME=$(grep "addappid" "$luafile" | head -1 | awk -F'-- ' '{print $2}')
@@ -159,17 +144,13 @@ jobs:
               sed -i '/^-- /d' "$luafile"
               NEW_HEADER="-- Lua provided by RyzenAPI\n-- Game: ${GAMENAME:-Jogo Desconhecido}"
               sed -i "1s/^/${NEW_HEADER}\n\n/" "$luafile"
-              echo "  ✓ Novo cabeçalho formatado para RyzenAPI"
             fi
 
-            # Recria o ZIP substituindo o antigo
+            # Recria o ZIP
             cd "$tmpdir"
             zip -q -r "$REPO_DIR/$zipfile" .
             cd "$REPO_DIR"
-
             rm -rf "$tmpdir"
-            UPDATED=$((UPDATED + 1))
-            echo "  ✓ ZIP atualizado com sucesso"
 
           done < /tmp/changed_zips.txt
 
@@ -179,22 +160,22 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add .
+          # Adiciona apenas arquivos ZIP modificados para evitar commits fantasmas de arquivos do sistema
+          git add "*.zip"
 
           STAGED=$(git diff --cached --name-only | grep '\.zip$' | wc -l || echo "0")
-          echo "Total de ZIPs modificados/novos para enviar: $STAGED"
+          echo "Total de ZIPs modificados para enviar: $STAGED"
 
           if [ "$STAGED" -gt 0 ]; then
-            git commit -m "bot: sincronização por data e padronização LUA efetuada para RyzenAPI"
+            git commit -m "bot: patch de segurança e cabeçalho RyzenAPI aplicado aos ZIPs"
             CURRENT_BRANCH=$(git branch --show-current)
             git push origin "$CURRENT_BRANCH"
             echo "✓ Alterações enviadas com sucesso!"
           else
-            echo "Nenhuma mudança nova detectada nos arquivos."
+            echo "Nenhuma mudança real nos arquivos ZIP."
           fi
 
       - name: Salvar registro do último commit processado
         if: steps.check.outputs.changed == 'true'
         run: |
           echo "${{ steps.check.outputs.upstream }}" > .last_sha
-          echo "✓ Registro atualizado no cache"
