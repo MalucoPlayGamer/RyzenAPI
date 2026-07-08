@@ -37,6 +37,7 @@ jobs:
           UPSTREAM_REPO: Skyapi
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # CORREÇÃO: Apontando para commits/main direto para evitar quebras de indexação da API
           UPSTREAM_SHA=$(curl -sf -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/main" | jq -r '.sha')
           
@@ -79,14 +80,13 @@ jobs:
           mkdir -p /tmp/incoming_zips
           LAST_SHA=$(cat .last_sha 2>/dev/null || echo "")
           
-          # Se o usuário marcou full_sync MANUALMENTE ou se é a PRIMEIRA execução do repositório (sem .last_sha anterior)
           if [ "${{ inputs.full_sync }}" = "true" ] || [ -z "$LAST_SHA" ]; then
-            echo "🔄 Mapeando estrutura completa do upstream (Full Sync ou Inicialização)..."
+            echo "🔄 Mapeando estrutura completa do upstream (Full Sync ativo)..."
             curl -s -H "Authorization: token $GH_TOKEN" \
               "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/git/trees/main?recursive=1" \
               | jq -r '.tree[] | select(.type=="blob" and (.path | endswith(".zip"))) | .path' > /tmp/files_to_download.txt
           else
-            # SOLUÇÃO COMPLETA: Compara todo o intervalo de commits para não perder nada acumulado!
+            # INTELEIGÊNCIA COMPREENSIVA: Usa o compare para rastrear múltiplos commits sem perder pacotes
             echo "🔍 Analisando intervalo de alterações: $LAST_SHA até $UPSTREAM_SHA..."
             curl -s -H "Authorization: token $GH_TOKEN" \
               "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/compare/${LAST_SHA}...${UPSTREAM_SHA}" \
@@ -109,11 +109,11 @@ jobs:
                 
             done < /tmp/files_to_download.txt
           else
-            echo "✓ Nenhuma alteração acumulada em arquivos .zip no intervalo detectada."
+            echo "✓ Nenhuma alteração acumulada em arquivos .zip encontrada."
           fi
           rm -f /tmp/files_to_download.txt
 
-      - name: Identificar Estritamente os ZIPs Modificados / Alvos
+      - name: Identificar Estritamente os ZIPs Modificados
         id: zips
         if: steps.check.outputs.changed == 'true'
         run: |
@@ -133,7 +133,7 @@ jobs:
 
           COUNT=$(wc -l < /tmp/changed_zips.txt || echo "0")
           echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "Arquivos na fila de merge inteligente: $COUNT"
+          echo "Arquivos afetados a processar: $COUNT"
 
       - name: Modificar LUA dentro dos ZIPs Alvos
         if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
@@ -170,6 +170,7 @@ jobs:
 
             ANY_LUA_CHANGED=false
             
+            # Utilização do Process Substitution para não perder o escopo da variável local
             while IFS= read -r incoming_lua; do
               [ -z "$incoming_lua" ] && continue
               filename=$(basename "$incoming_lua")
@@ -178,8 +179,9 @@ jobs:
 
               REAL_GAMENAME=""
 
+              # CORREÇÃO DA REGEX: Tenta extrair o nome limpo do cabeçalho sem capturar strings genéricas do loop
               if [ -z "$REAL_GAMENAME" ]; then
-                REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|Game:" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|MAIN APPLICATION" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
               fi
 
               if [ -z "$REAL_GAMENAME" ]; then
@@ -187,9 +189,10 @@ jobs:
               fi
 
               if [ -z "$REAL_GAMENAME" ] && [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
-                REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" | grep -vE "provided by|Game:|addappid" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" | grep -vE "provided by|MAIN APPLICATION|addappid" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
               fi
 
+              # Se falhar nas tentativas, faz o fallback via API da Steam ou usa o ID puro em vez de injetar uma string quebrada
               if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ ^[0-9]+$ ]] || [[ "$REAL_GAMENAME" =~ "addappid" ]] || [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
                 STEAM_NAME=$(curl -s "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
                 if [ ! -z "$STEAM_NAME" ] && [ "$STEAM_NAME" != "null" ]; then
@@ -199,6 +202,7 @@ jobs:
                 fi
               fi
 
+              # Unificar addappid E addtoken de ambos os lados sem perdas
               grep -E "addappid\(|addtoken\(" "$incoming_lua" | tr -d '\r' > "$tmpdir/lines.tmp"
 
               if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
@@ -207,6 +211,7 @@ jobs:
 
               sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
 
+              # Montar o arquivo final limpo na pasta incoming
               printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
               
               if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v -q ","; then
@@ -223,6 +228,7 @@ jobs:
               sed -i 's/SkyAPI/RyzenAPI/g' "$incoming_lua"
               sed -i 's/skyapi/ryzenapi/g' "$incoming_lua"
 
+              # Guardião binário: Só marca mudança real se o conteúdo de texto for alterado de verdade
               if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                 if ! cmp -s "$incoming_lua" "$local_lua"; then
                   ANY_LUA_CHANGED=true
@@ -233,12 +239,12 @@ jobs:
             done < <(find "$tmpdir/incoming" -type f -name "*.lua")
 
             if [ "$ANY_LUA_CHANGED" = true ]; then
-              echo "✓ Alteração de conteúdo real detectada em $zipfile. Recompilando ZIP..."
+              echo "✓ Alteração real identificada em $zipfile. Salvando e zipando..."
               cd "$tmpdir/incoming"
               zip -q -r "$REPO_DIR/$zipfile" .
               cd "$REPO_DIR"
             else
-              echo "– Conteúdo interno de $zipfile continua idêntico. Ignorando re-zip."
+              echo "– Conteúdo de $zipfile manteve-se intacto. Operação de re-zip evitada."
             fi
 
             rm -rf "$tmpdir"
@@ -265,7 +271,7 @@ jobs:
           fi
 
           STAGED=$(git diff --cached --name-only | grep -E '\.zip$|\.last_sha$' | wc -l || echo "0")
-          echo "Total de arquivos modificados detectados pelo Git: $STAGED"
+          echo "Postando total de arquivos modificados: $STAGED"
 
           if [ "$STAGED" -gt 0 ]; then
             git commit -m "bot: patch e assinatura RyzenAPI aplicados cirurgicamente via merge"
@@ -273,5 +279,5 @@ jobs:
             git push origin "$CURRENT_BRANCH"
             echo "✓ Repositório atualizado com sucesso!"
           else
-            echo "Nenhuma mudança real detectada no merge. Nada a commitar."
+            echo "Nenhuma mudança real pendente para commitar."
           fi
