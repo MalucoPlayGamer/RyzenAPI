@@ -80,38 +80,48 @@ jobs:
           mkdir -p /tmp/incoming_zips
           LAST_SHA=$(cat .last_sha 2>/dev/null || echo "")
           
+          # MODO FULL SYNC OTIMIZADO: Baixa o ZIP mestre de uma vez só para ser ultra rápido e evitar Rate Limit
           if [ "${{ inputs.full_sync }}" = "true" ] || [ -z "$LAST_SHA" ]; then
-            echo "🔄 Mapeando estrutura completa do upstream (Full Sync ativo)..."
-            curl -s -H "Authorization: token $GH_TOKEN" \
-              "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/git/trees/main?recursive=1" \
-              | jq -r '.tree[] | select(.type=="blob" and (.path | endswith(".zip"))) | .path' > /tmp/files_to_download.txt
+            echo "🔄 Modo FULL SYNC ativo. Baixando repositório mestre completo..."
+            mkdir -p /tmp/upstream_master
+            
+            curl -sL -H "Authorization: token $GH_TOKEN" \
+              "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/archive/refs/heads/main.zip" -o /tmp/upstream.zip
+            
+            unzip -q /tmp/upstream.zip -d /tmp/upstream_master
+            
+            # Move apenas os arquivos .zip da pasta extraída para a pasta de processamento
+            find /tmp/upstream_master -type f -name "*.zip" -exec cp {} /tmp/incoming_zips/ \;
+            
+            rm -rf /tmp/upstream_master /tmp/upstream.zip
+            echo "✓ Todos os ZIPs do upstream foram extraídos para a fila."
           else
-            # INTELEIGÊNCIA COMPREENSIVA: Usa o compare para rastrear múltiplos commits sem perder pacotes
+            # INTELEIGÊNCIA COMPREENSIVA: No dia a dia, usa o compare e baixa um por um (são poucos arquivos)
             echo "🔍 Analisando intervalo de alterações: $LAST_SHA até $UPSTREAM_SHA..."
             curl -s -H "Authorization: token $GH_TOKEN" \
               "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/compare/${LAST_SHA}...${UPSTREAM_SHA}" \
               | jq -r '.files[] | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' > /tmp/files_to_download.txt
-          fi
 
-          DOWNLOAD_COUNT=$(wc -l < /tmp/files_to_download.txt || echo "0")
-          echo "Quantidade de arquivos ZIP na fila para download: $DOWNLOAD_COUNT"
+            DOWNLOAD_COUNT=$(wc -l < /tmp/files_to_download.txt || echo "0")
+            echo "Quantidade de arquivos ZIP na fila para download diário: $DOWNLOAD_COUNT"
 
-          if [ "$DOWNLOAD_COUNT" -gt 0 ]; then
-            while IFS= read -r remote_path; do
-              [ -z "$remote_path" ] && continue
-              zipfile=$(basename "$remote_path")
-              echo "Baixando do Skyflare: $zipfile"
-              
-              curl -sL -H "Authorization: token $GH_TOKEN" \
-                "https://raw.githubusercontent.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/$UPSTREAM_SHA/$remote_path" -o /tmp/incoming_zips/"$zipfile" || \
-              curl -sL -H "Authorization: token $GH_TOKEN" \
-                "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/raw/$UPSTREAM_SHA/$remote_path" -o /tmp/incoming_zips/"$zipfile"
+            if [ "$DOWNLOAD_COUNT" -gt 0 ]; then
+              while IFS= read -r remote_path; do
+                [ -z "$remote_path" ] && continue
+                zipfile=$(basename "$remote_path")
+                echo "Baixando cirurgicamente do Skyflare: $zipfile"
                 
-            done < /tmp/files_to_download.txt
-          else
-            echo "✓ Nenhuma alteração acumulada em arquivos .zip encontrada."
+                curl -sL -H "Authorization: token $GH_TOKEN" \
+                  "https://raw.githubusercontent.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/$UPSTREAM_SHA/$remote_path" -o /tmp/incoming_zips/"$zipfile" || \
+                curl -sL -H "Authorization: token $GH_TOKEN" \
+                  "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/raw/$UPSTREAM_SHA/$remote_path" -o /tmp/incoming_zips/"$zipfile"
+                  
+              done < /tmp/files_to_download.txt
+            else
+              echo "✓ Nenhuma alteração acumulada em arquivos .zip encontrada."
+            fi
+            rm -f /tmp/files_to_download.txt
           fi
-          rm -f /tmp/files_to_download.txt
 
       - name: Identificar Estritamente os ZIPs Modificados
         id: zips
