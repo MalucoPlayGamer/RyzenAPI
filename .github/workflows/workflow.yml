@@ -128,7 +128,6 @@ jobs:
               git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" | grep -E '\.zip$' > /tmp/changed_zips.txt || true
             fi
           else
-            # LÓGICA CORRIGIDA: No sync automático, a nossa lista de alvos é o que está isolado na pasta temporária
             mkdir -p /tmp/incoming_zips
             ls /tmp/incoming_zips | grep -E '\.zip$' > /tmp/changed_zips.txt || true
           fi
@@ -158,10 +157,8 @@ jobs:
             # 2. Isolar e extrair o arquivo RECEBIDO (INCOMING)
             mkdir -p "$tmpdir/incoming"
             if [ "$MODE" = "manual_push" ]; then
-              # Se você postou manual, o arquivo novo está na raiz do repositório
               unzip -q "$REPO_DIR/$zipfile" -d "$tmpdir/incoming"
             else
-              # Se veio do Skyflare, o arquivo novo está na pasta isolada temporária
               unzip -q /tmp/incoming_zips/"$zipfile" -d "$tmpdir/incoming"
             fi
 
@@ -187,7 +184,8 @@ jobs:
                 grep -E "addappid\(|addtoken\(" "$local_lua" | tr -d '\r' >> "$tmpdir/lines.tmp"
               fi
 
-              awk '!seen[$0]++' "$tmpdir/lines.tmp" > "$tmpdir/lines_clean.tmp"
+              # CORREÇÃO CRÍTICA AQUI: Remove duplicatas E garante o alinhamento correto das DLCs/Tokens
+              sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
 
               # Montar o arquivo final limpo na pasta incoming
               printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
