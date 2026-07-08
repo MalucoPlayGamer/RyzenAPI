@@ -7,7 +7,7 @@ on:
     paths:
       - '**.zip' # Acorda apenas quando arquivos ZIP forem atualizados ou adicionados
   schedule:
-    - cron: '*/30 * * * *' # Checa o Skyflare de forma automatizada a cada 30 minutos
+    - cron: '*/5 * * * *' # Checa o Skyflare de forma automatizada a cada 30 minutos
   workflow_dispatch:
     inputs:
       full_sync:
