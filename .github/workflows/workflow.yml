@@ -38,7 +38,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           UPSTREAM_SHA=$(curl -sf -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits" | jq -r '.[0].sha')
+            "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/main" | jq -r '.sha')
           
           if [ -z "$UPSTREAM_SHA" ] || [ "$UPSTREAM_SHA" = "null" ]; then
             echo "::error:: Não foi possível obter o commit mais recente do Skyflare via API."
@@ -68,53 +68,52 @@ jobs:
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Sincronizar Upstream e Isolar Novidades
+      - name: Baixar Apenas os ZIPs Alterados do Upstream
         if: steps.check.outputs.changed == 'true' && steps.check.outputs.mode == 'upstream_sync'
         env:
           UPSTREAM_OWNER: skyflarefox
           UPSTREAM_REPO: Skyapi
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_SHA: ${{ steps.check.outputs.upstream }}
         run: |
-          mkdir -p /tmp/upstream
           mkdir -p /tmp/incoming_zips
+          LAST_SHA=$(cat .last_sha 2>/dev/null || echo "")
           
-          echo "Baixando versão mais recente do Skyflare..."
-          curl -sL -H "Authorization: token $GH_TOKEN" \
-            "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/archive/refs/heads/main.zip" -o /tmp/upstream.zip
-          unzip -q /tmp/upstream.zip -d /tmp/upstream
+          # Se o usuário marcou full_sync MANUALMENTE ou se é a PRIMEIRA execução do repositório (sem .last_sha anterior)
+          if [ "${{ inputs.full_sync }}" = "true" ] || [ -z "$LAST_SHA" ]; then
+            echo "🔄 Mapeando estrutura completa do upstream (Full Sync ou Inicialização)..."
+            curl -s -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/git/trees/main?recursive=1" \
+              | jq -r '.tree[] | select(.type=="blob" and (.path | endswith(".zip"))) | .path' > /tmp/files_to_download.txt
+          else
+            # SOLUÇÃO COMPLETA: Compara todo o intervalo de commits para não perder nada acumulado!
+            echo "🔍 Analisando intervalo de alterações: $LAST_SHA até $UPSTREAM_SHA..."
+            curl -s -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/compare/${LAST_SHA}...${UPSTREAM_SHA}" \
+              | jq -r '.files[] | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' > /tmp/files_to_download.txt
+          fi
 
-          UPSTREAM_DIR=$(find /tmp/upstream -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          DOWNLOAD_COUNT=$(wc -l < /tmp/files_to_download.txt || echo "0")
+          echo "Quantidade de arquivos ZIP na fila para download: $DOWNLOAD_COUNT"
 
-          # Passa por todos os ZIPs vindos do Skyflare
-          find "$UPSTREAM_DIR" -type f -name "*.zip" | while read upstream_zip; do
-            zipfile=$(basename "$upstream_zip")
-            local_zip="./$zipfile"
+          if [ "$DOWNLOAD_COUNT" -gt 0 ]; then
+            while IFS= read -r remote_path; do
+              [ -z "$remote_path" ] && continue
+              zipfile=$(basename "$remote_path")
+              echo "Baixando do Skyflare: $zipfile"
+              
+              curl -sL -H "Authorization: token $GH_TOKEN" \
+                "https://raw.githubusercontent.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/$UPSTREAM_SHA/$remote_path" -o /tmp/incoming_zips/"$zipfile" || \
+              curl -sL -H "Authorization: token $GH_TOKEN" \
+                "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/raw/$UPSTREAM_SHA/$remote_path" -o /tmp/incoming_zips/"$zipfile"
+                
+            done < /tmp/files_to_download.txt
+          else
+            echo "✓ Nenhuma alteração acumulada em arquivos .zip no intervalo detectada."
+          fi
+          rm -f /tmp/files_to_download.txt
 
-            if [ -f "$local_zip" ]; then
-              # Compara o MD5 interno dos arquivos .lua
-              mkdir -p /tmp/md5_upstream /tmp/md5_local
-              unzip -q "$upstream_zip" -d /tmp/md5_upstream
-              unzip -q "$local_zip" -d /tmp/md5_local
-
-              upstream_lua_md5=$(find /tmp/md5_upstream -type f -name "*.lua" -exec md5sum {} + | sort | md5sum | awk '{print $1}')
-              local_lua_md5=$(find /tmp/md5_local -type f -name "*.lua" -exec md5sum {} + | sort | md5sum | awk '{print $1}')
-
-              rm -rf /tmp/md5_upstream /tmp/md5_local
-
-              if [ "$upstream_lua_md5" != "$local_lua_md5" ]; then
-                echo "Modificação detectada em $zipfile -> Enviando para a fila de processamento."
-                cp "$upstream_zip" /tmp/incoming_zips/"$zipfile"
-              else
-                echo "Conteúdo de $zipfile idêntico, ignorando."
-              fi
-            else
-              echo "Novo arquivo do Skyflare detectado -> Enviando para a fila de processamento."
-              cp "$upstream_zip" /tmp/incoming_zips/"$zipfile"
-            fi
-          done
-          rm -rf /tmp/upstream /tmp/upstream.zip
-
-      - name: Identificar Estritamente os ZIPs Modificados
+      - name: Identificar Estritamente os ZIPs Modificados / Alvos
         id: zips
         if: steps.check.outputs.changed == 'true'
         run: |
@@ -129,12 +128,12 @@ jobs:
             fi
           else
             mkdir -p /tmp/incoming_zips
-            ls /tmp/incoming_zips | grep -E '\.zip$' > /tmp/changed_zips.txt || true
+            find /tmp/incoming_zips -maxdepth 1 -type f -name "*.zip" -printf "%f\n" > /tmp/changed_zips.txt || true
           fi
 
           COUNT=$(wc -l < /tmp/changed_zips.txt || echo "0")
           echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "Arquivos afetados a processar: $COUNT"
+          echo "Arquivos na fila de merge inteligente: $COUNT"
 
       - name: Modificar LUA dentro dos ZIPs Alvos
         if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
@@ -144,74 +143,70 @@ jobs:
           
           while IFS= read -r zipfile; do
             [ -z "$zipfile" ] && continue
-            echo "Processando patch e merge inteligente no arquivo: $zipfile"
 
             tmpdir=$(mktemp -d)
+            HAS_LOCAL=false
             
-            # 1. Isolar e extrair o arquivo LOCAL atual (se existir)
             if [ -f "$REPO_DIR/$zipfile" ]; then
               mkdir -p "$tmpdir/local"
               unzip -q "$REPO_DIR/$zipfile" -d "$tmpdir/local"
+              HAS_LOCAL=true
             fi
 
-            # 2. Isolar e extrair o arquivo RECEBIDO (INCOMING)
             mkdir -p "$tmpdir/incoming"
             if [ "$MODE" = "manual_push" ]; then
               unzip -q "$REPO_DIR/$zipfile" -d "$tmpdir/incoming"
             else
-              unzip -q /tmp/incoming_zips/"$zipfile" -d "$tmpdir/incoming"
+              if [ ! -f /tmp/incoming_zips/"$zipfile" ] && [ "$HAS_LOCAL" = true ]; then
+                cp "$REPO_DIR/$zipfile" /tmp/incoming_zips/"$zipfile"
+              fi
+              [ -f /tmp/incoming_zips/"$zipfile" ] && unzip -q /tmp/incoming_zips/"$zipfile" -d "$tmpdir/incoming"
             fi
 
-            # 3. Executar o Merge Inteligente comparando as duas pastas limpas
-            find "$tmpdir/incoming" -type f -name "*.lua" | while read incoming_lua; do
+            if [ ! -d "$tmpdir/incoming" ] || [ -z "$(ls -A "$tmpdir/incoming" 2>/dev/null)" ]; then
+              rm -rf "$tmpdir"
+              continue
+            fi
+
+            ANY_LUA_CHANGED=false
+            
+            while IFS= read -r incoming_lua; do
+              [ -z "$incoming_lua" ] && continue
               filename=$(basename "$incoming_lua")
               local_lua="$tmpdir/local/$filename"
               APP_ID=$(basename "$zipfile" .zip)
 
-              # --- CAPTURA INTELIGENTE E RESOLUÇÃO VIA API DO STEAM ---
               REAL_GAMENAME=""
 
-              # Tentativa 1: Buscar no cabeçalho original do Hubcap (Geralmente linha 2)
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|Game:" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
               fi
 
-              # Tentativa 2: Pegar da linha clássica do aplicativo base com comentário
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "addappid\(" "$incoming_lua" | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
               fi
 
-              # Tentativa 3: Olhar no arquivo local existente (se houver histórico válido)
-              if [ -z "$REAL_GAMENAME" ] && [ -f "$local_lua" ]; then
+              if [ -z "$REAL_GAMENAME" ] && [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                 REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" | grep -vE "provided by|Game:|addappid" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
               fi
 
-              # Validação Crítica: Se o nome veio vazio, se é apenas um número, ou se contém comandos de script
               if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ ^[0-9]+$ ]] || [[ "$REAL_GAMENAME" =~ "addappid" ]] || [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
-                echo "Nome ausente ou inválido no arquivo LUA. Consultando API do Steam para o AppID: $APP_ID..."
                 STEAM_NAME=$(curl -s "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
-                
                 if [ ! -z "$STEAM_NAME" ] && [ "$STEAM_NAME" != "null" ]; then
                   REAL_GAMENAME="$STEAM_NAME"
-                  echo "Nome resolvido com sucesso via Steam: $REAL_GAMENAME"
                 else
                   REAL_GAMENAME="$APP_ID"
                 fi
               fi
-              # ----------------------------------------------------------------------
 
-              # Unificar addappid E addtoken de ambos os lados sem perdas
               grep -E "addappid\(|addtoken\(" "$incoming_lua" | tr -d '\r' > "$tmpdir/lines.tmp"
 
-              if [ -f "$local_lua" ]; then
-                echo "Mesclando dados antigos locais com os novos do Skyflare..."
+              if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                 grep -E "addappid\(|addtoken\(" "$local_lua" | tr -d '\r' >> "$tmpdir/lines.tmp"
               fi
 
-              # Remove duplicatas E garante o alinhamento correto das DLCs/Tokens
               sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
 
-              # Montar o arquivo final limpo na pasta incoming
               printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
               
               if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v -q ","; then
@@ -227,12 +222,25 @@ jobs:
 
               sed -i 's/SkyAPI/RyzenAPI/g' "$incoming_lua"
               sed -i 's/skyapi/ryzenapi/g' "$incoming_lua"
-            done
 
-            # 4. Compactar a pasta incoming estruturada diretamente para a raiz do seu repositório
-            cd "$tmpdir/incoming"
-            zip -q -r "$REPO_DIR/$zipfile" .
-            cd "$REPO_DIR"
+              if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
+                if ! cmp -s "$incoming_lua" "$local_lua"; then
+                  ANY_LUA_CHANGED=true
+                fi
+              else
+                ANY_LUA_CHANGED=true
+              fi
+            done < <(find "$tmpdir/incoming" -type f -name "*.lua")
+
+            if [ "$ANY_LUA_CHANGED" = true ]; then
+              echo "✓ Alteração de conteúdo real detectada em $zipfile. Recompilando ZIP..."
+              cd "$tmpdir/incoming"
+              zip -q -r "$REPO_DIR/$zipfile" .
+              cd "$REPO_DIR"
+            else
+              echo "– Conteúdo interno de $zipfile continua idêntico. Ignorando re-zip."
+            fi
+
             rm -rf "$tmpdir"
           done < /tmp/changed_zips.txt
           
@@ -257,13 +265,13 @@ jobs:
           fi
 
           STAGED=$(git diff --cached --name-only | grep -E '\.zip$|\.last_sha$' | wc -l || echo "0")
-          echo "Postando total de arquivos modificados: $STAGED"
+          echo "Total de arquivos modificados detectados pelo Git: $STAGED"
 
           if [ "$STAGED" -gt 0 ]; then
-            git commit -m "bot: patch e assinatura RyzenAPI aplicados cirurgicamente"
+            git commit -m "bot: patch e assinatura RyzenAPI aplicados cirurgicamente via merge"
             CURRENT_BRANCH=$(git branch --show-current)
             git push origin "$CURRENT_BRANCH"
             echo "✓ Repositório atualizado com sucesso!"
           else
-            echo "Nenhuma mudança real pendente para commitar."
+            echo "Nenhuma mudança real detectada no merge. Nada a commitar."
           fi
