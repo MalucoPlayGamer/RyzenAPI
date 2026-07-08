@@ -167,31 +167,32 @@ jobs:
               filename=$(basename "$incoming_lua")
               local_lua="$tmpdir/local/$filename"
 
-              # --- CAPTURA AVANÇADA E ROBUSTA DO NOME DO JOGO ---
+              # --- CAPTURA CIRÚRGICA DO NOME DO JOGO ---
               REAL_GAMENAME=""
 
-              # Tentativa 1: Pegar do cabeçalho original do Hubcap (Geralmente a linha 2 ou 3)
+              # Tentativa 1: Pegar da linha clássica do aplicativo base (Ex: addappid(3017860, 1, "hash") -- DOOM...)
+              # Filtra "Depot", "Content", "Upgrade", "Edition", "Pack" e "Redist" para tentar achar o nome puro do jogo primeiro
               if [ -z "$REAL_GAMENAME" ]; then
-                REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "addappid\(" "$incoming_lua" | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
               fi
 
-              # Tentativa 2: Pegar da linha clássica addappid principal com comentário
+              # Tentativa 2: Se não achou o nome puro, pega qualquer addappid que tenha um comentário válido
               if [ -z "$REAL_GAMENAME" ]; then
-                REAL_GAMENAME=$(grep -E "addappid\([0-9]+\)\s*--" "$incoming_lua" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$incoming_lua" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
               fi
 
-              # Tentativa 3: Olhar no arquivo local existente (caso o recebido não tenha vindo com comentários)
+              # Tentativa 3: Buscar no cabeçalho original do Hubcap (Geralmente linha 2), ignorando assinaturas da RyzenAPI
+              if [ -z "$REAL_GAMENAME" ]; then
+                REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|Game:" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
+              fi
+
+              # Tentativa 4: Olhar no arquivo local existente se o incoming veio totalmente sem comentários
               if [ -z "$REAL_GAMENAME" ] && [ -f "$local_lua" ]; then
-                REAL_GAMENAME=$(grep -E "addappid\([0-9]+\)\s*--" "$local_lua" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" | grep -vE "provided by|Game:" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
               fi
 
-              # Tentativa 4: Limpar comentários comuns de Depot se o nome capturado veio como "Depot 123456"
-              if [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
-                REAL_GAMENAME=""
-              fi
-
-              # Fallback final: Se não achou em lugar nenhum, usa o ID do ZIP
-              if [ -z "$REAL_GAMENAME" ]; then
+              # Fallback final: Se virou "Depot XXXXX" ou sumiu tudo, usa o ID numérico do ZIP
+              if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
                 REAL_GAMENAME=$(basename "$zipfile" .zip)
               fi
               # --------------------------------------------------
