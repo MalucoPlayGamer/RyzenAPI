@@ -4,8 +4,10 @@ on:
   push:
     branches:
       - main
+    paths:
+      - '**.zip' # Acorda apenas quando arquivos ZIP forem atualizados ou adicionados
   schedule:
-    - cron: '*/30 * * * *' # Checa se há atualizações a cada 30 minutos
+    - cron: '*/30 * * * *' # Checa o Skyflare de forma automatizada a cada 30 minutos
   workflow_dispatch:
     inputs:
       full_sync:
@@ -19,6 +21,8 @@ permissions:
 jobs:
   sync-and-patch:
     runs-on: ubuntu-latest
+    # PROTEÇÃO ESSENCIAL: Evita o loop ignorando execuções causadas pelo próprio bot actions
+    if: github.actor != 'github-actions[bot]'
 
     steps:
       - name: Checkout seu repositório
@@ -34,7 +38,7 @@ jobs:
           path: .last_sha
           key: last-upstream-sha
 
-      - name: Checar se o Skyflare postou algo novo
+      - name: Checar Origem do Disparo e Novidades
         id: check
         env:
           UPSTREAM_OWNER: skyflarefox
@@ -52,32 +56,34 @@ jobs:
           echo "Último commit do Skyflare:  $UPSTREAM_SHA"
           echo "Último que processamos:      $LAST_SHA"
 
-          # Executa se for push seu, se o Skyflare mudou algo, ou se disparado manualmente
-          if [ "${{ github.event_name }}" = "push" ] || [ "$UPSTREAM_SHA" != "$LAST_SHA" ] || [ "${{ inputs.full_sync }}" = "true" ]; then
+          # Se o gatilho foi o seu PUSH manual, ignoramos a trava do Skyflare e processamos suas mudanças locais
+          if [ "${{ github.event_name }}" = "push" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "✓ Executando atualização de patches!"
+            echo "mode=manual_push" >> $GITHUB_OUTPUT
+            echo "✓ Processando arquivos enviados manualmente por você!"
+          elif [ "$UPSTREAM_SHA" != "$LAST_SHA" ] || [ "${{ inputs.full_sync }}" = "true" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "mode=upstream_sync" >> $GITHUB_OUTPUT
+            echo "✓ Nova atualização detectada no repositório do Skyflare!"
           else
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "Sem novidades para processar."
+            echo "Sem novidades para processar no momento."
           fi
 
-      - name: Baixar arquivos novos do Skyflare
-        if: steps.check.outputs.changed == 'true'
+      - name: Sincronizar Upstream por Data (Se a atualização veio do Skyflare)
+        if: steps.check.outputs.changed == 'true' && steps.check.outputs.mode == 'upstream_sync'
         env:
           UPSTREAM_OWNER: skyflarefox
           UPSTREAM_REPO: Skyapi
         run: |
-          echo "Baixando o repositório do Skyflare via ZIP temporário..."
+          echo "Baixando o repositório do Skyflare..."
           curl -sL "https://github.com/$UPSTREAM_OWNER/$UPSTREAM_REPO/archive/refs/heads/main.zip" -o /tmp/upstream.zip
           
-          echo "Extraindo arquivos do Skyflare..."
           mkdir /tmp/upstream_files
           unzip -q /tmp/upstream.zip -d /tmp/upstream_files
           
-          echo "Copiando novos arquivos ZIP (sem apagar os seus modificados por data)..."
           SOURCE_DIR="/tmp/upstream_files/Skyapi-main"
           
-          # Varre apenas os arquivos .zip vindos do Skyflare
           find "$SOURCE_DIR" -name "*.zip" | while read -r upstream_zip; do
             rel_path="${upstream_zip#$SOURCE_DIR/}"
             local_zip="./$rel_path"
@@ -94,20 +100,24 @@ jobs:
             fi
           done
 
-      - name: Detectar ZIPs para aplicar o Patch
+      - name: Identificar Estritamente os ZIPs Modificados
         if: steps.check.outputs.changed == 'true'
         id: zips
         run: |
-          # Garante estritamente que APENAS arquivos .zip entrem na lista de modificações
-          find . -maxdepth 2 -name "*.zip" -not -path "./.git/*" > /tmp/changed_zips.txt
+          # Se o gatilho foi seu push manual, o bot pega APENAS os arquivos que mudaram no seu commit contra o commit anterior
+          if [ "${{ steps.check.outputs.mode }}" = "manual_push" ]; then
+            echo "Listando apenas arquivos que você modificou neste commit:"
+            git diff --name-only HEAD^ HEAD | grep '\.zip$' > /tmp/changed_zips.txt || true
+          else
+            # Se veio do Skyflare ou full_sync, varre tudo para aplicar
+            find . -maxdepth 2 -name "*.zip" -not -path "./.git/*" > /tmp/changed_zips.txt
+          fi
 
           COUNT=$(wc -l < /tmp/changed_zips.txt)
-          echo "==============================="
-          echo "ZIPs prontos para processar: $COUNT"
-          echo "==============================="
+          echo "Quantidade de ZIPs para processar: $COUNT"
           echo "count=$COUNT" >> $GITHUB_OUTPUT
 
-      - name: Modificar LUA dentro dos ZIPs
+      - name: Modificar LUA dentro dos ZIPs Alvos
         if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
         run: |
           TOTAL=$(wc -l < /tmp/changed_zips.txt)
@@ -116,9 +126,8 @@ jobs:
 
           while IFS= read -r zipfile; do
             [ -z "$zipfile" ] && continue
-
             COUNT=$((COUNT + 1))
-            echo "[$COUNT/$TOTAL] Modificando ZIP: $zipfile"
+            echo "[$COUNT/$TOTAL] Aplicando Patch RyzenAPI no arquivo: $zipfile"
 
             tmpdir=$(mktemp -d)
             unzip -q "$zipfile" -d "$tmpdir"
@@ -129,13 +138,9 @@ jobs:
               continue
             fi
 
-            # 1. Comenta a linha do setManifestid
             sed -i 's/^\(setManifestid(.*)\)/-- \1/' "$luafile"
-
-            # 2. Substitui 'SkyAPI' por 'RyzenAPI'
             sed -i 's/SkyAPI/RyzenAPI/g' "$luafile"
 
-            # 3. Formata o cabeçalho se for "Hubcap Manifest"
             if grep -q "Hubcap Manifest" "$luafile"; then
               GAMENAME=$(grep -E "^-- " "$luafile" | head -2 | tail -1 | sed 's/^-- //')
               if [[ "$GAMENAME" == *"Created by"* || -z "$GAMENAME" ]]; then
@@ -146,36 +151,34 @@ jobs:
               sed -i "1s/^/${NEW_HEADER}\n\n/" "$luafile"
             fi
 
-            # Recria o ZIP
             cd "$tmpdir"
             zip -q -r "$REPO_DIR/$zipfile" .
             cd "$REPO_DIR"
             rm -rf "$tmpdir"
-
           done < /tmp/changed_zips.txt
-
-      - name: Enviar modificações para o seu GitHub
-        if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Adiciona apenas arquivos ZIP modificados para evitar commits fantasmas de arquivos do sistema
-          git add "*.zip"
-
-          STAGED=$(git diff --cached --name-only | grep '\.zip$' | wc -l || echo "0")
-          echo "Total de ZIPs modificados para enviar: $STAGED"
-
-          if [ "$STAGED" -gt 0 ]; then
-            git commit -m "bot: patch de segurança e cabeçalho RyzenAPI aplicado aos ZIPs"
-            CURRENT_BRANCH=$(git branch --show-current)
-            git push origin "$CURRENT_BRANCH"
-            echo "✓ Alterações enviadas com sucesso!"
-          else
-            echo "Nenhuma mudança real nos arquivos ZIP."
-          fi
 
       - name: Salvar registro do último commit processado
         if: steps.check.outputs.changed == 'true'
         run: |
           echo "${{ steps.check.outputs.upstream }}" > .last_sha
+          echo "✓ Registro guardado em cache de controle."
+
+      - name: Enviar modificações corrigidas de volta para o GitHub
+        if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add "*.zip" .last_sha
+
+          STAGED=$(git diff --cached --name-only | grep -E '\.zip$|\.last_sha$' | wc -l || echo "0")
+          echo "Postando total de arquivos modificados: $STAGED"
+
+          if [ "$STAGED" -gt 0 ]; then
+            git commit -m "bot: patch e assinatura RyzenAPI aplicados cirurgicamente nos arquivos modificados"
+            CURRENT_BRANCH=$(git branch --show-current)
+            git push origin "$CURRENT_BRANCH"
+            echo "✓ Repositório atualizado e livre de loops!"
+          else
+            echo "Nenhuma mudança de estrutura pendente."
+          fi
