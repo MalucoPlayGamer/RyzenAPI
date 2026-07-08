@@ -7,7 +7,7 @@ on:
     paths:
       - '**.zip' # Acorda apenas quando arquivos ZIP forem atualizados ou adicionados
   schedule:
-    - cron: '*/30 * * * *' # Corrigido para checar a cada 30 minutos (*/30)
+    - cron: '*/30 * * * *' # Checa o Skyflare de forma automatizada a cada 30 minutos
   workflow_dispatch:
     inputs:
       full_sync:
@@ -35,12 +35,14 @@ jobs:
         env:
           UPSTREAM_OWNER: skyflarefox
           UPSTREAM_REPO: Skyapi
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. Obter o SHA mais recente do repositório upstream
-          UPSTREAM_SHA=$(curl -sf "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/main" | jq -r '.sha')
+          # 1. Obter o SHA mais recente do repositório upstream passando o token de autenticação
+          UPSTREAM_SHA=$(curl -sf -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits" | jq -r '.[0].sha')
           
           if [ -z "$UPSTREAM_SHA" ] || [ "$UPSTREAM_SHA" = "null" ]; then
-            echo "::error:: Não foi possível obter o commit mais recente do Skyflare."
+            echo "::error:: Não foi possível obter o commit mais recente do Skyflare via API."
             exit 1
           fi
 
@@ -72,10 +74,13 @@ jobs:
         env:
           UPSTREAM_OWNER: skyflarefox
           UPSTREAM_REPO: Skyapi
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p /tmp/upstream
           echo "Baixando versão mais recente do Skyflare..."
-          curl -sL "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/archive/refs/heads/main.zip" -o /tmp/upstream.zip
+          # Usando o cabeçalho de autenticação também no download do zipball
+          curl -sL -H "Authorization: token $GH_TOKEN" \
+            "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/archive/refs/heads/main.zip" -o /tmp/upstream.zip
           unzip -q /tmp/upstream.zip -d /tmp/upstream
 
           UPSTREAM_DIR=$(find /tmp/upstream -mindepth 1 -maxdepth 1 -type d | head -n 1)
@@ -164,7 +169,6 @@ jobs:
               fi
 
               # Filtra duplicatas mantendo a ordem ou uma estrutura limpa
-              # Linhas com definições completas (com hashes e nomes de jogos) têm prioridade sobre declarações simples
               sort -u "$tmpdir/appids.tmp" | sort -V > "$tmpdir/appids_clean.tmp"
 
               # 3. Montar o arquivo final limpo
