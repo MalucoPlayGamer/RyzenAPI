@@ -159,32 +159,32 @@ jobs:
                 REAL_GAMENAME=$(basename "$zipfile" .zip)
               fi
 
-              # 2. Coletar e unificar os addappid de ambos os arquivos (Merge Inteligente)
-              echo "Coletando appids do arquivo recebido..."
-              grep -E "addappid\(" "$incoming_lua" | tr -d '\r' > "$tmpdir/appids.tmp"
+              # 2. Coletar e unificar os addappid E addtoken de ambos os arquivos (Merge Inteligente)
+              echo "Coletando dados do arquivo recebido..."
+              grep -E "addappid\(|addtoken\(" "$incoming_lua" | tr -d '\r' > "$tmpdir/lines.tmp"
 
               if [ -f "$local_lua" ]; then
-                echo "Mesclando com appids do arquivo local existente..."
-                grep -E "addappid\(" "$local_lua" | tr -d '\r' >> "$tmpdir/appids.tmp"
+                echo "Mesclando com dados do arquivo local existente..."
+                grep -E "addappid\(|addtoken\(" "$local_lua" | tr -d '\r' >> "$tmpdir/lines.tmp"
               fi
 
-              # Filtra duplicatas mantendo a ordem ou uma estrutura limpa
-              sort -u "$tmpdir/appids.tmp" | sort -V > "$tmpdir/appids_clean.tmp"
+              # Filtra duplicatas e ordena de forma inteligente para manter addtoken colado ao addappid correspondente
+              sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
 
               # 3. Montar o arquivo final limpo
               printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
               
-              # Adiciona a seção principal do aplicativo se houver a declaração curta, separando visualmente
-              if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/appids_clean.tmp" | grep -v -q ","; then
+              # Adiciona a seção principal do aplicativo se houver a declaração curta do AppID
+              if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v -q ","; then
                 echo "-- MAIN APPLICATION" >> "$incoming_lua"
-                grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/appids_clean.tmp" | grep -v "," >> "$incoming_lua"
+                grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v "," >> "$incoming_lua"
                 echo "" >> "$incoming_lua"
               fi
 
-              # Adiciona os depots (linhas com parâmetros de hash/manifesto)
-              if grep -q "," "$tmpdir/appids_clean.tmp"; then
-                echo "-- MAIN APP DEPOTS" >> "$incoming_lua"
-                grep "," "$tmpdir/appids_clean.tmp" >> "$incoming_lua"
+              # Adiciona o restante dos dados estruturados (Depots, DLCs e addtokens com parâmetros)
+              if grep -q "," "$tmpdir/lines_clean.tmp"; then
+                echo "-- MAIN APP DEPOTS / PACKAGES" >> "$incoming_lua"
+                grep "," "$tmpdir/lines_clean.tmp" >> "$incoming_lua"
               fi
 
               # 4. Substituições de string (SkyAPI -> RyzenAPI) no arquivo finalizado
