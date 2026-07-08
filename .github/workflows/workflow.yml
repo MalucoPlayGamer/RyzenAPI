@@ -205,19 +205,29 @@ jobs:
               # Se falhar nas tentativas anteriores, faz o fallback robusto por APIs
               if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ ^[0-9]+$ ]] || [[ "$REAL_GAMENAME" =~ "addappid" ]] || [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
                 echo "🌐 Buscando nome para o ID $APP_ID na API da Loja Steam..."
-                STEAM_NAME=$(curl -s --connect-timeout 5 --max-time 10 "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
+                STEAM_NAME=$(curl -s --connect-timeout 10 --max-time 20 "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
                 
                 # FALLBACK BASE STEAMDB (Se não tiver página na loja ou der erro)
                 if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
                   echo "🔍 ID não encontrado na loja. Buscando na base geral de Apps da Steam (Redundância SteamDB)..."
-                  # Esta API retorna uma lista. Filtramos direto pelo ID correto do jogo.
-                  STEAM_NAME=$(curl -s --connect-timeout 5 --max-time 10 "https://api.steampowered.com/ISteamApps/GetAppList/v2/" | jq -r ".applist.apps[] | select(.appid == ($APP_ID|tonumber)) | .name" | head -n 1 2>/dev/null || echo "")
+                  
+                  # Baixa o JSON em um arquivo temporário primeiro com mais tempo limite para garantir o download completo
+                  curl -s --connect-timeout 20 --max-time 60 "https://api.steampowered.com/ISteamApps/GetAppList/v2/" > "$tmpdir/steam_list.json"
+                  
+                  # Só executa o jq se o arquivo temporário for um JSON válido e não estiver vazio
+                  if [ -s "$tmpdir/steam_list.json" ] && jq -e . "$tmpdir/steam_list.json" >/dev/null 2>&1; then
+                    STEAM_NAME=$(jq -r ".applist.apps[] | select(.appid == ($APP_ID|tonumber)) | .name" "$tmpdir/steam_list.json" | head -n 1 2>/dev/null || echo "")
+                  else
+                    echo "⚠️ Falha ao baixar ou validar o catálogo completo da Steam (Timeout/Rate Limit)."
+                    STEAM_NAME=""
+                  fi
+                  rm -f "$tmpdir/steam_list.json"
                 fi
 
                 if [ ! -z "$STEAM_NAME" ] && [ "$STEAM_NAME" != "null" ]; then
                   REAL_GAMENAME="$STEAM_NAME"
                 else
-                  # Fallback final se o ID bizarramente não existir em lugar nenhum
+                  # Fallback final se o ID não existir em lugar nenhum
                   REAL_GAMENAME="$APP_ID"
                 fi
                 echo "🎮 Nome definido: $REAL_GAMENAME"
