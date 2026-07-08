@@ -151,6 +151,10 @@ jobs:
           REPO_DIR=$(pwd)
           MODE="${{ steps.check.outputs.mode }}"
           
+          # Criar um arquivo de cache temporário para evitar requisições redundantes à API da Steam
+          CACHE_API_STEAM="$REPO_DIR/steam_api_cache.tmp"
+          touch "$CACHE_API_STEAM"
+          
           while IFS= read -r zipfile; do
             [ -z "$zipfile" ] && continue
 
@@ -180,7 +184,6 @@ jobs:
 
             ANY_LUA_CHANGED=false
             
-            # Utilização do Process Substitution para não perder o escopo da variável local
             while IFS= read -r incoming_lua; do
               [ -z "$incoming_lua" ] && continue
               filename=$(basename "$incoming_lua")
@@ -189,46 +192,54 @@ jobs:
 
               REAL_GAMENAME=""
 
-              # CORREÇÃO DA REGEX: Tenta extrair o nome limpo do cabeçalho sem capturar strings genéricas do loop
+              # 1. Tenta extrair a linha "Game:" original limpando o prefixo para evitar duplicidade (Game: Game:)
+              if [ -z "$REAL_GAMENAME" ]; then
+                REAL_GAMENAME=$(grep -E "^--\s*Game:\s*" "$incoming_lua" | grep -vE "MAIN APPLICATION" | head -n 1 | sed -E 's/^--\s*Game:\s*//' | tr -d '\r')
+              fi
+
+              # 2. Se falhar, tenta ler a linha comentada genérica
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|MAIN APPLICATION" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
               fi
 
+              # 3. Se falhar, limpa do comentário do final da linha do addappid
               if [ -z "$REAL_GAMENAME" ]; then
-                REAL_GAMENAME=$(grep -E "addappid\(" "$incoming_lua" | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "addappid\(" "$incoming_lua" | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist" | head -n 1 | sed -E 's/.*--\s*//' | sed -E 's/^[Gg]ame:\s*//' | tr -d '\r')
               fi
 
-              #if [ -z "$REAL_GAMENAME" ] && [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
-                #REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" | grep -vE "provided by|MAIN APPLICATION|addappid" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
-              #fi
-
-              # Se falhar nas tentativas anteriores, faz o fallback robusto por APIs
+              # 4. SISTEMA DE FALLBACK INTELIGENTE COM CACHE LOCAL (Evita estouro de tempo / Rate Limit)
               if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ ^[0-9]+$ ]] || [[ "$REAL_GAMENAME" =~ "addappid" ]] || [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
-                echo "🌐 Buscando nome para o ID $APP_ID na API da Loja Steam..."
-                STEAM_NAME=$(curl -s --connect-timeout 10 --max-time 20 "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
                 
-                # FALLBACK REDUNDÂNCIA (Se não tiver página na loja, estiver delisted ou der nulo)
-                if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
-                  echo "🔍 ID não encontrado na loja padrão. Buscando via API alternativa do BigPicture..."
-                  
-                  # Este endpoint secundário da Steam é usado internamente pelo cliente e não cai com jogos removidos
-                  STEAM_NAME=$(curl -s --connect-timeout 10 --max-time 20 "https://store.steampowered.com/api/appdetails?appids=$APP_ID&filters=basic" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
-                  
-                  # Terceira barreira de proteção: Se ainda assim sumir (IDs de ferramentas/testes ocultos)
-                  if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
-                    echo "🛰️ Aplicando fallback final via API de banco de dados estático..."
-                    # Rota limpa e rápida que traz apenas o nome básico do App ID
-                    STEAM_NAME=$(curl -s --connect-timeout 10 --max-time 20 "https://steam-tracker.com/api?action=getAppDetails&appid=$APP_ID" | jq -r ".reply.name" 2>/dev/null || echo "")
-                  fi
-                fi
-
-                if [ ! -z "$STEAM_NAME" ] && [ "$STEAM_NAME" != "null" ]; then
-                  REAL_GAMENAME="$STEAM_NAME"
+                # Procura primeiro se já descobrimos esse ID nesta mesma execução
+                CACHED_NAME=$(grep "^${APP_ID}=" "$CACHE_API_STEAM" | cut -d'=' -f2- || echo "")
+                
+                if [ ! -z "$CACHED_NAME" ]; then
+                  REAL_GAMENAME="$CACHED_NAME"
                 else
-                  # Se o ID bizarramente não responder em nenhuma API, preserva o ID para não quebrar
-                  REAL_GAMENAME="$APP_ID"
+                  echo "🌐 Buscando nome para o ID $APP_ID na API da Loja Steam..."
+                  STEAM_NAME=$(curl -s --connect-timeout 5 --max-time 10 "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
+                  
+                  if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
+                    echo "🔍 ID não encontrado na loja padrão. Buscando via BigPicture..."
+                    STEAM_NAME=$(curl -s --connect-timeout 5 --max-time 10 "https://store.steampowered.com/api/appdetails?appids=$APP_ID&filters=basic" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
+                    
+                    if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
+                      echo "🛰️ Aplicando fallback via API estática..."
+                      STEAM_NAME=$(curl -s --connect-timeout 5 --max-time 10 "https://steam-tracker.com/api?action=getAppDetails&appid=$APP_ID" | jq -r ".reply.name" 2>/dev/null || echo "")
+                    fi
+                  fi
+
+                  if [ ! -z "$STEAM_NAME" ] && [ "$STEAM_NAME" != "null" ]; then
+                    REAL_GAMENAME="$STEAM_NAME"
+                    # Salva no cache para os próximos ficheiros que usarem o mesmo ID
+                    echo "${APP_ID}=${REAL_GAMENAME}" >> "$CACHE_API_STEAM"
+                  else
+                    REAL_GAMENAME="$APP_ID"
+                  fi
+                  echo "🎮 Nome definido com sucesso: $REAL_GAMENAME"
+                  # Pequena pausa cirúrgica de 200ms para evitar Rate Limit agressivo nas APIs
+                  sleep 0.2
                 fi
-                echo "🎮 Nome definido com sucesso: $REAL_GAMENAME"
               fi
 
               # Unificar addappid E addtoken de ambos os lados sem perdas
@@ -240,7 +251,7 @@ jobs:
 
               sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
 
-              # Montar o arquivo final limpo na pasta incoming
+              # Montar o arquivo final limpo sem duplicar a palavra "Game:"
               printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
               
               if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v -q ","; then
@@ -257,7 +268,6 @@ jobs:
               sed -i 's/SkyAPI/RyzenAPI/g' "$incoming_lua"
               sed -i 's/skyapi/ryzenapi/g' "$incoming_lua"
 
-              # Guardião binário: Só marca mudança real se o conteúdo de texto for alterado de verdade
               if [ "${{ inputs.full_sync }}" = "true" ]; then
                 ANY_LUA_CHANGED=true
               elif [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
@@ -281,6 +291,7 @@ jobs:
             rm -rf "$tmpdir"
           done < /tmp/changed_zips.txt
           
+          rm -f "$CACHE_API_STEAM"
           rm -rf /tmp/incoming_zips
 
       - name: Salvar registro do último commit processado
