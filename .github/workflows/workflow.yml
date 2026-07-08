@@ -91,15 +91,8 @@ jobs:
               local_md5=$(md5sum "$local_zip" | awk '{print $1}')
 
               if [ "$upstream_md5" != "$local_md5" ]; then
-                # Se o arquivo local foi alterado por você (não bate com a versão do bot anterior), mantemos o seu
-                # Usamos o Git para validar se o arquivo local possui modificações não rastreadas ou commits próprios
-                if git log -n 1 --format="%an" -- "$local_zip" | grep -q -v "github-actions"; then
-                  # Se o último commit no seu arquivo NÃO foi o bot, significa que você alterou manualmente
-                  echo "Aviso: $zipfile foi modificado por você. Mantendo sua versão local."
-                else
-                  echo "Atualizando $zipfile (Conteúdo diferente detectado no Skyflare)"
-                  cp "$upstream_zip" "$local_zip"
-                fi
+                echo "Atualizando $zipfile (Nova versão detectada no Skyflare)"
+                cp "$upstream_zip" "$local_zip"
               else
                 echo "Mantendo $zipfile (Conteúdo idêntico)"
               fi
