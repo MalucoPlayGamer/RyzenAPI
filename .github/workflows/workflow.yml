@@ -7,7 +7,7 @@ on:
     paths:
       - '**.zip' # Acorda apenas quando arquivos ZIP forem atualizados ou adicionados
   schedule:
-    - cron: '*/5 * * * *' # Checa o Skyflare de forma automatizada a cada 30 minutos
+    - cron: '*/30 * * * *' # Corrigido para checar a cada 30 minutos (*/30)
   workflow_dispatch:
     inputs:
       full_sync:
@@ -21,8 +21,7 @@ permissions:
 jobs:
   sync-and-patch:
     runs-on: ubuntu-latest
-    # PROTEÇÃO ESSENCIAL: Evita o loop ignorando execuções causadas pelo próprio bot actions
-    if: github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]' # Evita loops causados pelo próprio bot
 
     steps:
       - name: Checkout seu repositório
@@ -37,7 +36,7 @@ jobs:
           UPSTREAM_OWNER: skyflarefox
           UPSTREAM_REPO: Skyapi
         run: |
-          # 1. Obter o SHA mais recente direto da API do repositório do Skyflare
+          # 1. Obter o SHA mais recente do repositório upstream
           UPSTREAM_SHA=$(curl -sf "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/main" | jq -r '.sha')
           
           if [ -z "$UPSTREAM_SHA" ] || [ "$UPSTREAM_SHA" = "null" ]; then
@@ -45,23 +44,20 @@ jobs:
             exit 1
           fi
 
-          # 2. Ler o SHA processado anteriormente salvo direto na branch
           LAST_SHA=$(cat .last_sha 2>/dev/null || echo "")
+          EVENT_NAME="${{ github.event_name }}"
 
           echo "Último commit do Skyflare: $UPSTREAM_SHA"
           echo "Último que processamos:    $LAST_SHA"
 
-          # 3. Identificar o tipo de evento que disparou o Workflow
-          EVENT_NAME="${{ github.event_name }}"
-
           if [ "$EVENT_NAME" = "push" ]; then
-            echo "Disparo: PUSH MANUAL detectado no seu repositório."
+            echo "Disparo: PUSH MANUAL detectado."
             echo "mode=manual_push" >> $GITHUB_OUTPUT
             echo "changed=true" >> $GITHUB_OUTPUT
             echo "upstream=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
 
           elif [ "$UPSTREAM_SHA" != "$LAST_SHA" ] || [ "${{ inputs.full_sync }}" = "true" ]; then
-            echo "✓ Nova atualização detectada no repositório do Skyflare!"
+            echo "✓ Nova atualização detectada no Skyflare!"
             echo "mode=upstream_sync" >> $GITHUB_OUTPUT
             echo "changed=true" >> $GITHUB_OUTPUT
             echo "upstream=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
@@ -71,7 +67,7 @@ jobs:
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Sincronizar Upstream por Data (Se a atualização veio do Skyflare)
+      - name: Sincronizar Upstream comparando Conteúdo (MD5)
         if: steps.check.outputs.changed == 'true' && steps.check.outputs.mode == 'upstream_sync'
         env:
           UPSTREAM_OWNER: skyflarefox
@@ -84,23 +80,31 @@ jobs:
 
           UPSTREAM_DIR=$(find /tmp/upstream -mindepth 1 -maxdepth 1 -type d | head -n 1)
 
-          # Só copia o arquivo do Skyflare se ele for MAIS NOVO que o seu arquivo local
+          # Passa por todos os ZIPs vindos do Skyflare
           find "$UPSTREAM_DIR" -type f -name "*.zip" | while read upstream_zip; do
             zipfile=$(basename "$upstream_zip")
             local_zip="./$zipfile"
 
             if [ -f "$local_zip" ]; then
-              upstream_time=$(stat -c %Y "$upstream_zip")
-              local_time=$(stat -c %Y "$local_zip")
+              # Calcula MD5 para checar o conteúdo real, ignorando metadados de data
+              upstream_md5=$(md5sum "$upstream_zip" | awk '{print $1}')
+              local_md5=$(md5sum "$local_zip" | awk '{print $1}')
 
-              if [ "$upstream_time" -gt "$local_time" ]; then
-                echo "Atualizando $zipfile (Versão do Skyflare é mais recente)"
-                cp "$upstream_zip" "$local_zip"
+              if [ "$upstream_md5" != "$local_md5" ]; then
+                # Se o arquivo local foi alterado por você (não bate com a versão do bot anterior), mantemos o seu
+                # Usamos o Git para validar se o arquivo local possui modificações não rastreadas ou commits próprios
+                if git log -n 1 --format="%an" -- "$local_zip" | grep -q -v "github-actions"; then
+                  # Se o último commit no seu arquivo NÃO foi o bot, significa que você alterou manualmente
+                  echo "Aviso: $zipfile foi modificado por você. Mantendo sua versão local."
+                else
+                  echo "Atualizando $zipfile (Conteúdo diferente detectado no Skyflare)"
+                  cp "$upstream_zip" "$local_zip"
+                fi
               else
-                echo "Mantendo $zipfile local (O seu arquivo é mais recente)"
+                echo "Mantendo $zipfile (Conteúdo idêntico)"
               fi
             else
-              echo "Novo arquivo adicionado: $zipfile"
+              echo "Novo arquivo adicionado do upstream: $zipfile"
               cp "$upstream_zip" "$local_zip"
             fi
           done
@@ -111,14 +115,11 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         run: |
           if [ "${{ steps.check.outputs.mode }}" = "manual_push" ]; then
-            # Se você fez push manual, foca nos arquivos enviados nesse commit
+            # Pega exatamente os arquivos alterados no seu push manual
             git diff --name-only HEAD~1 HEAD | grep -E '\.zip$' > /tmp/changed_zips.txt || true
           else
-            # Se veio do schedule/sync, avalia todos os ZIPs do repositório
+            # Sincronização automática: foca nos arquivos modificados localmente (pelo passo anterior)
             git status --porcelain | grep -E '\.zip$' | awk '{print $2}' > /tmp/changed_zips.txt || true
-            if [ ! -s /tmp/changed_zips.txt ]; then
-              find . -maxdepth 1 -name "*.zip" -sed 's|^\./||' > /tmp/changed_zips.txt
-            fi
           fi
 
           COUNT=$(wc -l < /tmp/changed_zips.txt || echo "0")
@@ -137,14 +138,11 @@ jobs:
             tmpdir=$(mktemp -d)
             unzip -q "$zipfile" -d "$tmpdir"
 
-            luafile=$(find "$tmpdir" -type f -name "*.lua" | head -n 1)
-
-            if [ -n "$luafile" ]; then
-              # Altera SkyAPI para RyzenAPI no conteúdo do LUA
+            # Encontra e atualiza arquivos LUA dentro do pacote
+            find "$tmpdir" -type f -name "*.lua" | while read luafile; do
               sed -i 's/SkyAPI/RyzenAPI/g' "$luafile"
               sed -i 's/skyapi/ryzenapi/g' "$luafile"
 
-              # Substitui cabeçalhos antigos ou insere a nova assinatura RyzenAPI
               if grep -q "\-\- Lua provided by" "$luafile"; then
                 sed -i 's/\-\- Lua provided by.*/-- Lua provided by RyzenAPI/' "$luafile"
               else
@@ -161,14 +159,13 @@ jobs:
           done < /tmp/changed_zips.txt
 
       - name: Salvar registro do último commit processado
-        # Só atualiza a marcação .last_sha no repositório se a novidade veio de fato do Skyflare
         if: steps.check.outputs.changed == 'true' && steps.check.outputs.mode == 'upstream_sync'
         run: |
           echo "${{ steps.check.outputs.upstream }}" > .last_sha
           echo "✓ Registro do Skyflare guardado em .last_sha."
 
       - name: Enviar modificações corrigidas de volta para o GitHub
-        if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
+        if: steps.check.outputs.changed == 'true'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -186,7 +183,7 @@ jobs:
             git commit -m "bot: patch e assinatura RyzenAPI aplicados cirurgicamente"
             CURRENT_BRANCH=$(git branch --show-current)
             git push origin "$CURRENT_BRANCH"
-            echo "✓ Repositório atualizado e sincronizado com sucesso!"
+            echo "✓ Repositório atualizado com sucesso!"
           else
-            echo "Nenhuma mudança pendente a commit."
+            echo "Nenhuma mudança real pendente para commitar."
           fi
