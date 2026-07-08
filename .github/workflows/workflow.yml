@@ -131,40 +131,36 @@ jobs:
         run: |
           REPO_DIR=$(pwd)
           
-          while read -r zipfile; do
+          while IFS= read -r zipfile; do
             [ -z "$zipfile" ] && continue
-            echo "Processando e aplicando patch no arquivo: $zipfile"
-            
-            # Garante o caminho absoluto do arquivo zip original
-            ZIP_ABSOLUTO="$REPO_DIR/$zipfile"
+            echo "Processando patch no arquivo: $zipfile"
+
             tmpdir=$(mktemp -d)
-            
-            # Extrai direto na pasta temporária externa
-            unzip -q "$ZIP_ABSOLUTO" -d "$tmpdir"
-            
-            # Encontra arquivos .lua dentro do zip temporário
-            luafile=$(find "$tmpdir" -name "*.lua" | head -n 1)
-            if [ -n "$luafile" ]; then
-              echo "Aplicando patch interno em: $(basename "$luafile")"
-              
-              # Substitui referências textuais antigas pelo padrão RyzenAPI
+            unzip -q "$zipfile" -d "$tmpdir"
+
+            # Encontra e atualiza arquivos LUA dentro do pacote
+            find "$tmpdir" -type f -name "*.lua" | while read luafile; do
+              # 1. Substituições de texto exatas e seguras
               sed -i 's/SkyAPI/RyzenAPI/g' "$luafile"
               sed -i 's/skyapi/ryzenapi/g' "$luafile"
-              
-              # Limpa e reconstrói cabeçalhos antigos sem quebrar a lógica original do script
-              sed -i '/--/d' "$luafile"
-              GAMENAME=$(basename "$zipfile" .zip)
-              NEW_HEADER="-- Lua provided by RyzenAPI\n-- Game: ${GAMENAME:-Jogo Desconhecido}"
-              sed -i "1s/^/${NEW_HEADER}\n\n/" "$luafile"
-            fi
 
-            # --- CORREÇÃO CIRÚRGICA AQUI ---
-            # Atualiza o arquivo zip original sem precisar dar 'cd' na máquina virtual
-            (cd "$tmpdir" && zip -q -r "$ZIP_ABSOLUTO" .)
-            
-            # Limpa a pasta temporária com segurança
+              # 2. Tratamento do cabeçalho sem risco de quebrar o arquivo original
+              if grep -q "Lua provided by" "$luafile"; then
+                # Se já existir um cabeçalho padrão, apenas atualiza a linha dele
+                sed -i 's/.*Lua provided by.*/-- Lua provided by RyzenAPI/' "$luafile"
+              else
+                # Se não existir, cria o cabeçalho e junta com o conteúdo original intacto (Método Seguro)
+                GAMENAME=$(basename "$zipfile" .zip)
+                printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$GAMENAME" > "$tmpdir/header.tmp"
+                cat "$luafile" >> "$tmpdir/header.tmp"
+                mv "$tmpdir/header.tmp" "$luafile"
+              fi
+            done
+
+            cd "$tmpdir"
+            zip -q -r "$REPO_DIR/$zipfile" .
+            cd "$REPO_DIR"
             rm -rf "$tmpdir"
-            
           done < /tmp/changed_zips.txt
 
       - name: Salvar registro do último commit processado
