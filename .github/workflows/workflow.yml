@@ -5,9 +5,9 @@ on:
     branches:
       - main
     paths:
-      - '**.zip' # Acorda apenas quando arquivos ZIP forem atualizados ou adicionados
+      - '**.zip'
   schedule:
-    - cron: '*/30 * * * *' # Checa o Skyflare de forma automatizada a cada 30 minutos
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       full_sync:
@@ -21,7 +21,7 @@ permissions:
 jobs:
   sync-and-patch:
     runs-on: ubuntu-latest
-    if: github.actor != 'github-actions[bot]' # Evita loops causados pelo próprio bot
+    if: github.actor != 'github-actions[bot]'
 
     steps:
       - name: Checkout seu repositório
@@ -37,7 +37,6 @@ jobs:
           UPSTREAM_REPO: Skyapi
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. Obter o SHA mais recente do repositório upstream passando o token de autenticação
           UPSTREAM_SHA=$(curl -sf -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits" | jq -r '.[0].sha')
           
@@ -69,7 +68,7 @@ jobs:
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Sincronizar Upstream comparando Conteúdo (MD5)
+      - name: Sincronizar Upstream e Isolar Novidades
         if: steps.check.outputs.changed == 'true' && steps.check.outputs.mode == 'upstream_sync'
         env:
           UPSTREAM_OWNER: skyflarefox
@@ -77,8 +76,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p /tmp/upstream
+          mkdir -p /tmp/incoming_zips
+          
           echo "Baixando versão mais recente do Skyflare..."
-          # Usando o cabeçalho de autenticação também no download do zipball
           curl -sL -H "Authorization: token $GH_TOKEN" \
             "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/archive/refs/heads/main.zip" -o /tmp/upstream.zip
           unzip -q /tmp/upstream.zip -d /tmp/upstream
@@ -91,19 +91,25 @@ jobs:
             local_zip="./$zipfile"
 
             if [ -f "$local_zip" ]; then
-              # Calcula MD5 para checar o conteúdo real, ignorando metadados de data
-              upstream_md5=$(md5sum "$upstream_zip" | awk '{print $1}')
-              local_md5=$(md5sum "$local_zip" | awk '{print $1}')
+              # Compara o MD5 interno dos arquivos .lua
+              mkdir -p /tmp/md5_upstream /tmp/md5_local
+              unzip -q "$upstream_zip" -d /tmp/md5_upstream
+              unzip -q "$local_zip" -d /tmp/md5_local
 
-              if [ "$upstream_md5" != "$local_md5" ]; then
-                echo "Atualizando $zipfile (Nova versão detectada no Skyflare)"
-                cp "$upstream_zip" "$local_zip"
+              upstream_lua_md5=$(find /tmp/md5_upstream -type f -name "*.lua" -exec md5sum {} + | sort | md5sum | awk '{print $1}')
+              local_lua_md5=$(find /tmp/md5_local -type f -name "*.lua" -exec md5sum {} + | sort | md5sum | awk '{print $1}')
+
+              rm -rf /tmp/md5_upstream /tmp/md5_local
+
+              if [ "$upstream_lua_md5" != "$local_lua_md5" ]; then
+                echo "Modificação detectada em $zipfile -> Enviando para a fila de processamento."
+                cp "$upstream_zip" /tmp/incoming_zips/"$zipfile"
               else
-                echo "Mantendo $zipfile (Conteúdo idêntico)"
+                echo "Conteúdo de $zipfile idêntico, ignorando."
               fi
             else
-              echo "Novo arquivo adicionado do upstream: $zipfile"
-              cp "$upstream_zip" "$local_zip"
+              echo "Novo arquivo do Skyflare detectado -> Enviando para a fila de processamento."
+              cp "$upstream_zip" /tmp/incoming_zips/"$zipfile"
             fi
           done
           rm -rf /tmp/upstream /tmp/upstream.zip
@@ -113,11 +119,18 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         run: |
           if [ "${{ steps.check.outputs.mode }}" = "manual_push" ]; then
-            # Pega exatamente os arquivos alterados no seu push manual
-            git diff --name-only HEAD~1 HEAD | grep -E '\.zip$' > /tmp/changed_zips.txt || true
+            BEFORE_SHA="${{ github.event.before }}"
+            AFTER_SHA="${{ github.event.after }}"
+            
+            if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+              git diff-tree --no-commit-id --name-only -r "$AFTER_SHA" | grep -E '\.zip$' > /tmp/changed_zips.txt || true
+            else
+              git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" | grep -E '\.zip$' > /tmp/changed_zips.txt || true
+            fi
           else
-            # Sincronização automática: foca nos arquivos modificados localmente (pelo passo anterior)
-            git status --porcelain | grep -E '\.zip$' | awk '{print $2}' > /tmp/changed_zips.txt || true
+            # LÓGICA CORRIGIDA: No sync automático, a nossa lista de alvos é o que está isolado na pasta temporária
+            mkdir -p /tmp/incoming_zips
+            ls /tmp/incoming_zips | grep -E '\.zip$' > /tmp/changed_zips.txt || true
           fi
 
           COUNT=$(wc -l < /tmp/changed_zips.txt || echo "0")
@@ -128,6 +141,7 @@ jobs:
         if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
         run: |
           REPO_DIR=$(pwd)
+          MODE="${{ steps.check.outputs.mode }}"
           
           while IFS= read -r zipfile; do
             [ -z "$zipfile" ] && continue
@@ -135,22 +149,28 @@ jobs:
 
             tmpdir=$(mktemp -d)
             
-            # Se o arquivo já existe no seu repositório, extrai ele para comparar/fazer merge
+            # 1. Isolar e extrair o arquivo LOCAL atual (se existir)
             if [ -f "$REPO_DIR/$zipfile" ]; then
               mkdir -p "$tmpdir/local"
               unzip -q "$REPO_DIR/$zipfile" -d "$tmpdir/local"
             fi
 
-            # Extrai o ZIP que veio do passo anterior (seja o novo do Skyflare ou o seu upload manual)
+            # 2. Isolar e extrair o arquivo RECEBIDO (INCOMING)
             mkdir -p "$tmpdir/incoming"
-            unzip -q "$zipfile" -d "$tmpdir/incoming"
+            if [ "$MODE" = "manual_push" ]; then
+              # Se você postou manual, o arquivo novo está na raiz do repositório
+              unzip -q "$REPO_DIR/$zipfile" -d "$tmpdir/incoming"
+            else
+              # Se veio do Skyflare, o arquivo novo está na pasta isolada temporária
+              unzip -q /tmp/incoming_zips/"$zipfile" -d "$tmpdir/incoming"
+            fi
 
-            # Processa os arquivos encontrados no pacote recebido
+            # 3. Executar o Merge Inteligente comparando as duas pastas limpas
             find "$tmpdir/incoming" -type f -name "*.lua" | while read incoming_lua; do
               filename=$(basename "$incoming_lua")
               local_lua="$tmpdir/local/$filename"
 
-              # 1. Descobrir o nome real do jogo (busca no arquivo recebido ou no local)
+              # Descobrir o nome real do jogo
               REAL_GAMENAME=$(grep -E "addappid\([0-9]+\) --" "$incoming_lua" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
               if [ -z "$REAL_GAMENAME" ] && [ -f "$local_lua" ]; then
                 REAL_GAMENAME=$(grep -E "addappid\([0-9]+\) --" "$local_lua" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
@@ -159,45 +179,42 @@ jobs:
                 REAL_GAMENAME=$(basename "$zipfile" .zip)
               fi
 
-              # 2. Coletar e unificar os addappid E addtoken de ambos os arquivos (Merge Inteligente)
-              echo "Coletando dados do arquivo recebido..."
+              # Unificar addappid E addtoken de ambos os lados sem perdas
               grep -E "addappid\(|addtoken\(" "$incoming_lua" | tr -d '\r' > "$tmpdir/lines.tmp"
 
               if [ -f "$local_lua" ]; then
-                echo "Mesclando com dados do arquivo local existente..."
+                echo "Mesclando dados antigos locais com os novos do Skyflare..."
                 grep -E "addappid\(|addtoken\(" "$local_lua" | tr -d '\r' >> "$tmpdir/lines.tmp"
               fi
 
-              # Filtra duplicatas e ordena de forma inteligente para manter addtoken colado ao addappid correspondente
-              sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
+              awk '!seen[$0]++' "$tmpdir/lines.tmp" > "$tmpdir/lines_clean.tmp"
 
-              # 3. Montar o arquivo final limpo
+              # Montar o arquivo final limpo na pasta incoming
               printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
               
-              # Adiciona a seção principal do aplicativo se houver a declaração curta do AppID
               if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v -q ","; then
                 echo "-- MAIN APPLICATION" >> "$incoming_lua"
                 grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v "," >> "$incoming_lua"
                 echo "" >> "$incoming_lua"
               fi
 
-              # Adiciona o restante dos dados estruturados (Depots, DLCs e addtokens com parâmetros)
               if grep -q "," "$tmpdir/lines_clean.tmp"; then
                 echo "-- MAIN APP DEPOTS / PACKAGES" >> "$incoming_lua"
                 grep "," "$tmpdir/lines_clean.tmp" >> "$incoming_lua"
               fi
 
-              # 4. Substituições de string (SkyAPI -> RyzenAPI) no arquivo finalizado
               sed -i 's/SkyAPI/RyzenAPI/g' "$incoming_lua"
               sed -i 's/skyapi/ryzenapi/g' "$incoming_lua"
             done
 
-            # Compacta novamente o ZIP atualizado com os arquivos mesclados
+            # 4. Compactar a pasta incoming estruturada diretamente para a raiz do seu repositório
             cd "$tmpdir/incoming"
             zip -q -r "$REPO_DIR/$zipfile" .
             cd "$REPO_DIR"
             rm -rf "$tmpdir"
           done < /tmp/changed_zips.txt
+          
+          rm -rf /tmp/incoming_zips
 
       - name: Salvar registro do último commit processado
         if: steps.check.outputs.changed == 'true' && steps.check.outputs.mode == 'upstream_sync'
