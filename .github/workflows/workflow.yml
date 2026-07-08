@@ -138,23 +138,34 @@ jobs:
             tmpdir=$(mktemp -d)
             unzip -q "$zipfile" -d "$tmpdir"
 
-            # Encontra e atualiza arquivos LUA dentro do pacote
             find "$tmpdir" -type f -name "*.lua" | while read luafile; do
-              # 1. Substituições de texto exatas e seguras
-              sed -i 's/SkyAPI/RyzenAPI/g' "$luafile"
-              sed -i 's/skyapi/ryzenapi/g' "$luafile"
-
-              # 2. Tratamento do cabeçalho sem risco de quebrar o arquivo original
-              if grep -q "Lua provided by" "$luafile"; then
-                # Se já existir um cabeçalho padrão, apenas atualiza a linha dele
-                sed -i 's/.*Lua provided by.*/-- Lua provided by RyzenAPI/' "$luafile"
-              else
-                # Se não existir, cria o cabeçalho e junta com o conteúdo original intacto (Método Seguro)
-                GAMENAME=$(basename "$zipfile" .zip)
-                printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$GAMENAME" > "$tmpdir/header.tmp"
-                cat "$luafile" >> "$tmpdir/header.tmp"
-                mv "$tmpdir/header.tmp" "$luafile"
+              # 1. Extrair o nome real do jogo de dentro do arquivo (procura por "addappid(XXXXXX) -- Nome")
+              # Se não achar, tenta pegar da linha "Thirteen: ..." do Hubcap, senão usa o ID como fallback.
+              REAL_GAMENAME=$(grep -E "addappid\([0-9]+\) --" "$luafile" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
+              
+              if [ -z "$REAL_GAMENAME" ]; then
+                REAL_GAMENAME=$(grep -E "^--\s*[A-Za-z0-9]" "$luafile" | grep -v "Hubcap" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
               fi
+              if [ -z "$REAL_GAMENAME" ]; then
+                REAL_GAMENAME=$(basename "$zipfile" .zip)
+              fi
+
+              # 2. Criar o arquivo limpo apenas com o novo cabeçalho RyzenAPI
+              printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$tmpdir/clean.lua"
+
+              # 3. Filtrar o arquivo original jogando para o arquivo limpo:
+              # - Remove linhas que começam com os comentários do Hubcap (-- Hubcap, -- Thirteen:, -- Created:, etc)
+              # - Remove linhas completamente vazias no topo do arquivo original
+              # - Remove a linha do setManifestid por completo
+              grep -v -E "^--\s*.*Hubcap|^--\s*Thirteen|^--\s*Created|^--\s*Website|^--\s*Total Depots|^setManifestid\(" "$luafile" | \
+              sed -e '/./,$!d' >> "$tmpdir/clean.lua"
+
+              # 4. Aplicar as substituições de strings textuais (SkyAPI -> RyzenAPI)
+              sed -i 's/SkyAPI/RyzenAPI/g' "$tmpdir/clean.lua"
+              sed -i 's/skyapi/ryzenapi/g' "$tmpdir/clean.lua"
+
+              # Substitui o arquivo original pelo corrigido e limpo
+              mv "$tmpdir/clean.lua" "$luafile"
             done
 
             cd "$tmpdir"
