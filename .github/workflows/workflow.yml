@@ -239,7 +239,9 @@ jobs:
               sed -i 's/skyapi/ryzenapi/g' "$incoming_lua"
 
               # Guardião binário: Só marca mudança real se o conteúdo de texto for alterado de verdade
-              if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
+              if [ "${{ inputs.full_sync }}" = "true" ]; then
+                ANY_LUA_CHANGED=true
+              elif [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                 if ! cmp -s "$incoming_lua" "$local_lua"; then
                   ANY_LUA_CHANGED=true
                 fi
@@ -249,12 +251,12 @@ jobs:
             done < <(find "$tmpdir/incoming" -type f -name "*.lua")
 
             if [ "$ANY_LUA_CHANGED" = true ]; then
-              echo "✓ Alteração real identificada em $zipfile. Salvando e zipando..."
+              echo "✓ [FORÇADO/ALTERADO] Atualizando cabeçalho e salvando $zipfile..."
               cd "$tmpdir/incoming"
               zip -q -r "$REPO_DIR/$zipfile" .
               cd "$REPO_DIR"
             else
-              echo "– Conteúdo de $zipfile manteve-se intacto. Operação de re-zip evitada."
+              echo "– Conteúdo de $zipfile manteve-se intacto."
             fi
 
             rm -rf "$tmpdir"
