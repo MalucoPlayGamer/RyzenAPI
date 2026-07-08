@@ -158,10 +158,11 @@ jobs:
           done < /tmp/changed_zips.txt
 
       - name: Salvar registro do último commit processado
-        if: steps.check.outputs.changed == 'true'
+        # CORREÇÃO: Só salva o .last_sha se a atualização veio de fato do Skyflare!
+        if: steps.check.outputs.changed == 'true' && steps.check.outputs.mode == 'upstream_sync'
         run: |
           echo "${{ steps.check.outputs.upstream }}" > .last_sha
-          echo "✓ Registro guardado em cache de controle."
+          echo "✓ Registro do Skyflare guardado com sucesso."
 
       - name: Enviar modificações corrigidas de volta para o GitHub
         if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
@@ -169,13 +170,18 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add "*.zip" .last_sha
+          # Se foi push manual, não adiciona o .last_sha para não estragar o histórico do cron
+          if [ "${{ steps.check.outputs.mode }}" = "upstream_sync" ]; then
+            git add "*.zip" .last_sha
+          else
+            git add "*.zip"
+          fi
 
           STAGED=$(git diff --cached --name-only | grep -E '\.zip$|\.last_sha$' | wc -l || echo "0")
           echo "Postando total de arquivos modificados: $STAGED"
 
           if [ "$STAGED" -gt 0 ]; then
-            git commit -m "bot: patch e assinatura RyzenAPI aplicados cirurgicamente nos arquivos modificados"
+            git commit -m "bot: patch e assinatura RyzenAPI aplicados cirurgicamente"
             CURRENT_BRANCH=$(git branch --show-current)
             git push origin "$CURRENT_BRANCH"
             echo "✓ Repositório atualizado e livre de loops!"
