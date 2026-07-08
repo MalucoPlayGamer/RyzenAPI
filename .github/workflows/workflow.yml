@@ -188,9 +188,9 @@ jobs:
                 REAL_GAMENAME=$(grep -E "addappid\(" "$incoming_lua" | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
               fi
 
-              if [ -z "$REAL_GAMENAME" ] && [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
-                REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" | grep -vE "provided by|MAIN APPLICATION|addappid" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
-              fi
+              #if [ -z "$REAL_GAMENAME" ] && [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
+                #REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" | grep -vE "provided by|MAIN APPLICATION|addappid" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
+              #fi
 
               # Se falhar nas tentativas, faz o fallback via API da Steam ou usa o ID puro em vez de injetar uma string quebrada
               if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ ^[0-9]+$ ]] || [[ "$REAL_GAMENAME" =~ "addappid" ]] || [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
