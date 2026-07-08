@@ -126,42 +126,70 @@ jobs:
           
           while IFS= read -r zipfile; do
             [ -z "$zipfile" ] && continue
-            echo "Processando patch no arquivo: $zipfile"
+            echo "Processando patch e merge inteligente no arquivo: $zipfile"
 
             tmpdir=$(mktemp -d)
-            unzip -q "$zipfile" -d "$tmpdir"
+            
+            # Se o arquivo já existe no seu repositório, extrai ele para comparar/fazer merge
+            if [ -f "$REPO_DIR/$zipfile" ]; then
+              mkdir -p "$tmpdir/local"
+              unzip -q "$REPO_DIR/$zipfile" -d "$tmpdir/local"
+            fi
 
-            find "$tmpdir" -type f -name "*.lua" | while read luafile; do
-              # 1. Extrair o nome real do jogo de dentro do arquivo (procura por "addappid(XXXXXX) -- Nome")
-              # Se não achar, tenta pegar da linha "Thirteen: ..." do Hubcap, senão usa o ID como fallback.
-              REAL_GAMENAME=$(grep -E "addappid\([0-9]+\) --" "$luafile" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
-              
-              if [ -z "$REAL_GAMENAME" ]; then
-                REAL_GAMENAME=$(grep -E "^--\s*[A-Za-z0-9]" "$luafile" | grep -v "Hubcap" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
+            # Extrai o ZIP que veio do passo anterior (seja o novo do Skyflare ou o seu upload manual)
+            mkdir -p "$tmpdir/incoming"
+            unzip -q "$zipfile" -d "$tmpdir/incoming"
+
+            # Processa os arquivos encontrados no pacote recebido
+            find "$tmpdir/incoming" -type f -name "*.lua" | while read incoming_lua; do
+              filename=$(basename "$incoming_lua")
+              local_lua="$tmpdir/local/$filename"
+
+              # 1. Descobrir o nome real do jogo (busca no arquivo recebido ou no local)
+              REAL_GAMENAME=$(grep -E "addappid\([0-9]+\) --" "$incoming_lua" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
+              if [ -z "$REAL_GAMENAME" ] && [ -f "$local_lua" ]; then
+                REAL_GAMENAME=$(grep -E "addappid\([0-9]+\) --" "$local_lua" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
               fi
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(basename "$zipfile" .zip)
               fi
 
-              # 2. Criar o arquivo limpo apenas com o novo cabeçalho RyzenAPI
-              printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$tmpdir/clean.lua"
+              # 2. Coletar e unificar os addappid de ambos os arquivos (Merge Inteligente)
+              echo "Coletando appids do arquivo recebido..."
+              grep -E "addappid\(" "$incoming_lua" | tr -d '\r' > "$tmpdir/appids.tmp"
 
-              # 3. Filtrar o arquivo original jogando para o arquivo limpo:
-              # - Remove linhas que começam com os comentários do Hubcap (-- Hubcap, -- Thirteen:, -- Created:, etc)
-              # - Remove linhas completamente vazias no topo do arquivo original
-              # - Remove a linha do setManifestid por completo
-              grep -v -E "^--\s*.*Hubcap|^--\s*Thirteen|^--\s*Created|^--\s*Website|^--\s*Total Depots|^setManifestid\(" "$luafile" | \
-              sed -e '/./,$!d' >> "$tmpdir/clean.lua"
+              if [ -f "$local_lua" ]; then
+                echo "Mesclando com appids do arquivo local existente..."
+                grep -E "addappid\(" "$local_lua" | tr -d '\r' >> "$tmpdir/appids.tmp"
+              fi
 
-              # 4. Aplicar as substituições de strings textuais (SkyAPI -> RyzenAPI)
-              sed -i 's/SkyAPI/RyzenAPI/g' "$tmpdir/clean.lua"
-              sed -i 's/skyapi/ryzenapi/g' "$tmpdir/clean.lua"
+              # Filtra duplicatas mantendo a ordem ou uma estrutura limpa
+              # Linhas com definições completas (com hashes e nomes de jogos) têm prioridade sobre declarações simples
+              sort -u "$tmpdir/appids.tmp" | sort -V > "$tmpdir/appids_clean.tmp"
 
-              # Substitui o arquivo original pelo corrigido e limpo
-              mv "$tmpdir/clean.lua" "$luafile"
+              # 3. Montar o arquivo final limpo
+              printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
+              
+              # Adiciona a seção principal do aplicativo se houver a declaração curta, separando visualmente
+              if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/appids_clean.tmp" | grep -v -q ","; then
+                echo "-- MAIN APPLICATION" >> "$incoming_lua"
+                grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/appids_clean.tmp" | grep -v "," >> "$incoming_lua"
+                echo "" >> "$incoming_lua"
+              fi
+
+              # Adiciona os depots (linhas com parâmetros de hash/manifesto)
+              if grep -q "," "$tmpdir/appids_clean.tmp"; then
+                echo "-- MAIN APP DEPOTS" >> "$incoming_lua"
+                grep "," "$tmpdir/appids_clean.tmp" >> "$incoming_lua"
+              fi
+
+              # 4. Substituições de string (SkyAPI -> RyzenAPI) no arquivo finalizado
+              sed -i 's/SkyAPI/RyzenAPI/g' "$incoming_lua"
+              sed -i 's/skyapi/ryzenapi/g' "$incoming_lua"
             done
 
-            cd "$tmpdir"
+            # Compacta novamente o ZIP atualizado com os arquivos mesclados
+            cd "$tmpdir/incoming"
             zip -q -r "$REPO_DIR/$zipfile" .
             cd "$REPO_DIR"
             rm -rf "$tmpdir"
