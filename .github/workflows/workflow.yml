@@ -37,7 +37,6 @@ jobs:
           UPSTREAM_REPO: Skyapi
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # CORREÇÃO: Apontando para commits/main direto para evitar quebras de indexação da API
           UPSTREAM_SHA=$(curl -sf -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/main" | jq -r '.sha')
           
@@ -80,7 +79,6 @@ jobs:
           mkdir -p /tmp/incoming_zips
           LAST_SHA=$(cat .last_sha 2>/dev/null || echo "")
           
-          # MODO FULL SYNC OTIMIZADO: Baixa o ZIP mestre de uma vez só para ser ultra rápido e evitar Rate Limit
           if [ "${{ inputs.full_sync }}" = "true" ] || [ -z "$LAST_SHA" ]; then
             echo "🔄 Modo FULL SYNC ativo. Baixando repositório mestre completo..."
             mkdir -p /tmp/upstream_master
@@ -89,14 +87,10 @@ jobs:
               "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/archive/refs/heads/main.zip" -o /tmp/upstream.zip
             
             unzip -q /tmp/upstream.zip -d /tmp/upstream_master
-            
-            # Move apenas os arquivos .zip da pasta extraída para a pasta de processamento
             find /tmp/upstream_master -type f -name "*.zip" -exec cp {} /tmp/incoming_zips/ \;
-            
             rm -rf /tmp/upstream_master /tmp/upstream.zip
             echo "✓ Todos os ZIPs do upstream foram extraídos para a fila."
           else
-            # INTELEIGÊNCIA COMPREENSIVA: No dia a dia, usa o compare e baixa um por um (são poucos arquivos)
             echo "🔍 Analisando intervalo de alterações: $LAST_SHA até $UPSTREAM_SHA..."
             curl -s -H "Authorization: token $GH_TOKEN" \
               "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/compare/${LAST_SHA}...${UPSTREAM_SHA}" \
@@ -151,7 +145,6 @@ jobs:
           REPO_DIR=$(pwd)
           MODE="${{ steps.check.outputs.mode }}"
           
-          # Criar um arquivo de cache temporário para evitar requisições redundantes à API da Steam
           CACHE_API_STEAM="$REPO_DIR/steam_api_cache.tmp"
           touch "$CACHE_API_STEAM"
           
@@ -192,66 +185,71 @@ jobs:
 
               REAL_GAMENAME=""
 
-              # 1. Tenta extrair a linha "Game:" original limpando o prefixo para evitar duplicidade (Game: Game:)
+              # 1. Tenta extrair a linha "Game:" original limpando o prefixo para evitar duplicidade
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "^--\s*Game:\s*" "$incoming_lua" | grep -vE "MAIN APPLICATION" | head -n 1 | sed -E 's/^--\s*Game:\s*//' | tr -d '\r')
               fi
 
-              # 2. Se falhar, tenta ler a linha comentada genérica
+              # 2. Se falhar, tenta ler a linha comentada genérica do upstream
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|MAIN APPLICATION" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
               fi
 
-              # 3. Se falhar, limpa do comentário do final da linha do addappid
+              # 3. SE FALHAR NO UPSTREAM, TENTA PEGAR DO SEU ARQUIVO LOCAL (Herança preservada)
+              if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ "MAIN APPLICATION" ]]; then
+                if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
+                  REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" | grep -vE "provided by|MAIN APPLICATION|addappid" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
+                fi
+              fi
+
+              # 4. Se ainda assim falhar, limpa do comentário do final da linha do addappid do próprio arquivo
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "addappid\(" "$incoming_lua" | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist" | head -n 1 | sed -E 's/.*--\s*//' | sed -E 's/^[Gg]ame:\s*//' | tr -d '\r')
               fi
 
-              # 4. SISTEMA DE FALLBACK INTELIGENTE COM CACHE LOCAL (Evita estouro de tempo / Rate Limit)
-              if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ ^[0-9]+$ ]] || [[ "$REAL_GAMENAME" =~ "addappid" ]] || [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
+              # 5. SISTEMA DE FALLBACK INTELIGENTE COM CACHE LOCAL E APIs
+              if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ ^[0-9]+$ ]] || [[ "$REAL_GAMENAME" =~ "addappid" ]] || [[ "$REAL_GAMENAME" =~ "MAIN APPLICATION" ]] || [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
                 
-                # Procura primeiro se já descobrimos esse ID nesta mesma execução
                 CACHED_NAME=$(grep "^${APP_ID}=" "$CACHE_API_STEAM" | cut -d'=' -f2- || echo "")
                 
                 if [ ! -z "$CACHED_NAME" ]; then
                   REAL_GAMENAME="$CACHED_NAME"
                 else
-                  echo "🌐 Buscando nome para o ID $APP_ID na API da Loja Steam..."
-                  STEAM_NAME=$(curl -s --connect-timeout 5 --max-time 10 "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
+                  echo "🌐 Consultando APIs públicas para o ID pendente: $APP_ID"
+                  STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
                   
                   if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
-                    echo "🔍 ID não encontrado na loja padrão. Buscando via BigPicture..."
-                    STEAM_NAME=$(curl -s --connect-timeout 5 --max-time 10 "https://store.steampowered.com/api/appdetails?appids=$APP_ID&filters=basic" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
+                    STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://store.steampowered.com/api/appdetails?appids=$APP_ID&filters=basic" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
                     
                     if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
-                      echo "🛰️ Aplicando fallback via API estática..."
-                      STEAM_NAME=$(curl -s --connect-timeout 5 --max-time 10 "https://steam-tracker.com/api?action=getAppDetails&appid=$APP_ID" | jq -r ".reply.name" 2>/dev/null || echo "")
+                      STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://steam-tracker.com/api?action=getAppDetails&appid=$APP_ID" | jq -r ".reply.name" 2>/dev/null || echo "")
                     fi
                   fi
 
                   if [ ! -z "$STEAM_NAME" ] && [ "$STEAM_NAME" != "null" ]; then
                     REAL_GAMENAME="$STEAM_NAME"
-                    # Salva no cache para os próximos ficheiros que usarem o mesmo ID
                     echo "${APP_ID}=${REAL_GAMENAME}" >> "$CACHE_API_STEAM"
                   else
                     REAL_GAMENAME="$APP_ID"
                   fi
-                  echo "🎮 Nome definido com sucesso: $REAL_GAMENAME"
-                  # Pequena pausa cirúrgica de 200ms para evitar Rate Limit agressivo nas APIs
-                  sleep 0.2
+                  sleep 0.15
                 fi
               fi
 
-              # Unificar addappid E addtoken de ambos os lados sem perdas
+              # Unificar addappid E addtoken eliminando quebras invisíveis
               grep -E "addappid\(|addtoken\(" "$incoming_lua" | tr -d '\r' > "$tmpdir/lines.tmp"
 
               if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                 grep -E "addappid\(|addtoken\(" "$local_lua" | tr -d '\r' >> "$tmpdir/lines.tmp"
               fi
 
+              # CORREÇÃO CRUCIAL: Limpa restos de comentários antigos fixados nas linhas de addappid/addtoken
+              sed -i -E 's/\s*--\s*Game:\s*.*//gI' "$tmpdir/lines.tmp"
+              sed -i -E 's/\s*--\s*MAIN APPLICATION.*//gI' "$tmpdir/lines.tmp"
+
               sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
 
-              # Montar o arquivo final limpo sem duplicar a palavra "Game:"
+              # Montar o arquivo final estruturado de forma limpa
               printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
               
               if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v -q ","; then
@@ -279,13 +277,11 @@ jobs:
               fi
             done < <(find "$tmpdir/incoming" -type f -name "*.lua")
 
-            if [ "$ANY_LUA_CHANGED" = true ]; then
-              echo "✓ [FORÇADO/ALTERADO] Atualizando cabeçalho e salvando $zipfile..."
+            if [ "$ANY_LUA_CHANGED" = true ] || [ "${{ inputs.full_sync }}" = "true" ]; then
+              echo "✓ [ATUALIZADO] Reestruturando cabeçalhos limpos de $zipfile..."
               cd "$tmpdir/incoming"
               zip -q -r "$REPO_DIR/$zipfile" .
               cd "$REPO_DIR"
-            else
-              echo "– Conteúdo de $zipfile manteve-se intacto."
             fi
 
             rm -rf "$tmpdir"
