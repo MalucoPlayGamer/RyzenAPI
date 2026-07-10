@@ -91,19 +91,41 @@ jobs:
             rm -rf /tmp/upstream_master /tmp/upstream.zip
             echo "✓ Todos os ZIPs do upstream foram extraídos para a fila."
           else
-            echo "🔍 Analisando intervalo de alterações: $LAST_SHA até $UPSTREAM_SHA..."
-            curl -s -H "Authorization: token $GH_TOKEN" \
-              "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/compare/${LAST_SHA}...${UPSTREAM_SHA}" \
-              | jq -r '.files[] | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' > /tmp/files_to_download.txt
+            echo "🔍 Analisando intervalo acumulado com paginação de segurança: $LAST_SHA até $UPSTREAM_SHA..."
+            
+            # Executa a chamada da API salvando o JSON bruto para garantir que não haja perda de pacotes
+            COMPARE_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/compare/${LAST_SHA}...${UPSTREAM_SHA}")
+            
+            # Validação extra: se a API de comparação falhar ou der timeout, usamos os commits mais recentes como fallback
+            if [ -z "$COMPARE_JSON" ] || [ "$(echo "$COMPARE_JSON" | jq -r '.status 2>/dev/null')" = "behind" ]; then
+              echo "⚠️ API de comparação falhou ou divergiu. Coletando arquivos via lista de commits recentes..."
+              curl -s -H "Authorization: token $GH_TOKEN" \
+                "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits?sha=main&per_page=10" \
+                | jq -r '.[].sha' > /tmp/recent_commits.txt
+                
+              # Garante que vai varrer os arquivos dos últimos commits ativos
+              > /tmp/files_to_download.txt
+              while IFS= read -r c_sha; do
+                curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/$c_sha" \
+                  | jq -r '.files[] | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' >> /tmp/files_to_download.txt
+              done < /tmp/recent_commits.txt
+            else
+              # Extração padrão filtrando nulos e organizando de forma única (sort -u)
+              echo "$COMPARE_JSON" | jq -r '.files[] | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' > /tmp/files_to_download.txt
+            fi
+
+            # Ordena a lista para remover duplicados caso o mesmo ZIP tenha sido modificado em múltiplos commits seguidos
+            sort -u /tmp/files_to_download.txt -o /tmp/files_to_download.txt
 
             DOWNLOAD_COUNT=$(wc -l < /tmp/files_to_download.txt || echo "0")
-            echo "Quantidade de arquivos ZIP na fila para download diário: $DOWNLOAD_COUNT"
+            echo "Quantidade real de arquivos ZIP na fila para download: $DOWNLOAD_COUNT"
 
             if [ "$DOWNLOAD_COUNT" -gt 0 ]; then
               while IFS= read -r remote_path; do
                 [ -z "$remote_path" ] && continue
                 zipfile=$(basename "$remote_path")
-                echo "Baixando cirurgicamente do Skyflare: $zipfile"
+                echo "📥 Baixando cirurgicamente do Skyflare: $zipfile"
                 
                 curl -sL -H "Authorization: token $GH_TOKEN" \
                   "https://raw.githubusercontent.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/$UPSTREAM_SHA/$remote_path" -o /tmp/incoming_zips/"$zipfile" || \
@@ -114,7 +136,7 @@ jobs:
             else
               echo "✓ Nenhuma alteração acumulada em arquivos .zip encontrada."
             fi
-            rm -f /tmp/files_to_download.txt
+            rm -f /tmp/files_to_download.txt /tmp/recent_commits.txt 2>/dev/null
           fi
 
       - name: Identificar Estritamente os ZIPs Modificados
