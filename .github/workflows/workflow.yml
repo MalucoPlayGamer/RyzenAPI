@@ -51,25 +51,30 @@ jobs:
           echo "Último commit do Skyflare: $UPSTREAM_SHA"
           echo "Último que processamos:    $LAST_SHA"
 
+          # Sempre verifica se o Skyflare tem novidades independente do gatilho
+          HAS_UPSTREAM_NEWS="false"
+          if [ "$UPSTREAM_SHA" != "$LAST_SHA" ] || [ "${{ inputs.full_sync }}" = "true" ]; then
+            HAS_UPSTREAM_NEWS="true"
+          fi
+
+          echo "upstream_news=$HAS_UPSTREAM_NEWS" >> $GITHUB_OUTPUT
+          echo "upstream=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
+
           if [ "$EVENT_NAME" = "push" ]; then
-            echo "Disparo: PUSH MANUAL detectado."
+            echo "Disparo: PUSH MANUAL detectado (e checaremos o upstream junto)."
             echo "mode=manual_push" >> $GITHUB_OUTPUT
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "upstream=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
-
-          elif [ "$UPSTREAM_SHA" != "$LAST_SHA" ] || [ "${{ inputs.full_sync }}" = "true" ]; then
-            echo "✓ Nova atualização detectada no Skyflare!"
+          elif [ "$HAS_UPSTREAM_NEWS" = "true" ]; then
+            echo "✓ Nova atualização detectada no Skyflare via Cron/Manual!"
             echo "mode=upstream_sync" >> $GITHUB_OUTPUT
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "upstream=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
-
           else
             echo "Sem novidades para processar no momento."
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Baixar Apenas os ZIPs Alterados do Upstream
-        if: steps.check.outputs.changed == 'true' && steps.check.outputs.mode == 'upstream_sync'
+      - name: Baixar ZIPs Alterados do Upstream (Se houver novidades)
+        if: steps.check.outputs.changed == 'true' && (steps.check.outputs.mode == 'upstream_sync' || steps.check.outputs.upstream_news == 'true')
         env:
           UPSTREAM_OWNER: skyflarefox
           UPSTREAM_REPO: Skyapi
@@ -82,96 +87,79 @@ jobs:
           if [ "${{ inputs.full_sync }}" = "true" ] || [ -z "$LAST_SHA" ]; then
             echo "🔄 Modo FULL SYNC ativo. Baixando repositório mestre completo..."
             mkdir -p /tmp/upstream_master
-            
             curl -sL -H "Authorization: token $GH_TOKEN" \
               "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/archive/refs/heads/main.zip" -o /tmp/upstream.zip
-            
             unzip -q /tmp/upstream.zip -d /tmp/upstream_master
             find /tmp/upstream_master -type f -name "*.zip" -exec cp {} /tmp/incoming_zips/ \;
             rm -rf /tmp/upstream_master /tmp/upstream.zip
-            echo "✓ Todos os ZIPs do upstream foram extraídos para a fila."
           else
-            echo "🔍 Analisando intervalo acumulado com paginação de segurança: $LAST_SHA até $UPSTREAM_SHA..."
-            
-            # Executa a chamada da API salvando o JSON bruto para garantir que não haja perda de pacotes
+            echo "🔍 Analisando intervalo acumulado: $LAST_SHA até $UPSTREAM_SHA..."
             COMPARE_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" \
               "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/compare/${LAST_SHA}...${UPSTREAM_SHA}")
             
-            # Validação extra: se a API de comparação falhar ou der timeout, usamos os commits mais recentes como fallback
             if [ -z "$COMPARE_JSON" ] || [ "$(echo "$COMPARE_JSON" | jq -r '.status 2>/dev/null')" = "behind" ]; then
-              echo "⚠️ API de comparação falhou ou divergiu. Coletando arquivos via lista de commits recentes..."
-              curl -s -H "Authorization: token $GH_TOKEN" \
-                "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits?sha=main&per_page=10" \
-                | jq -r '.[].sha' > /tmp/recent_commits.txt
-                
-              # Garante que vai varrer os arquivos dos últimos commits ativos
+              echo "⚠️ Fallback: Coletando commits recentes..."
+              curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits?sha=main&per_page=10" | jq -r '.[].sha' > /tmp/recent_commits.txt
               > /tmp/files_to_download.txt
               while IFS= read -r c_sha; do
-                curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/$c_sha" \
-                  | jq -r '.files[] | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' >> /tmp/files_to_download.txt
+                curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/$c_sha" | jq -r '.files[] | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' >> /tmp/files_to_download.txt
               done < /tmp/recent_commits.txt
             else
-              # Extração padrão filtrando nulos e organizando de forma única (sort -u)
               echo "$COMPARE_JSON" | jq -r '.files[] | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' > /tmp/files_to_download.txt
             fi
 
-            # Ordena a lista para remover duplicados caso o mesmo ZIP tenha sido modificado em múltiplos commits seguidos
             sort -u /tmp/files_to_download.txt -o /tmp/files_to_download.txt
-
-            DOWNLOAD_COUNT=$(wc -l < /tmp/files_to_download.txt || echo "0")
-            echo "Quantidade real de arquivos ZIP na fila para download: $DOWNLOAD_COUNT"
-
-            if [ "$DOWNLOAD_COUNT" -gt 0 ]; then
-              while IFS= read -r remote_path; do
-                [ -z "$remote_path" ] && continue
-                zipfile=$(basename "$remote_path")
-                echo "📥 Baixando cirurgicamente do Skyflare: $zipfile"
-                
-                curl -sL -H "Authorization: token $GH_TOKEN" \
-                  "https://raw.githubusercontent.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/$UPSTREAM_SHA/$remote_path" -o /tmp/incoming_zips/"$zipfile" || \
-                curl -sL -H "Authorization: token $GH_TOKEN" \
-                  "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/raw/$UPSTREAM_SHA/$remote_path" -o /tmp/incoming_zips/"$zipfile"
-                  
-              done < /tmp/files_to_download.txt
-            else
-              echo "✓ Nenhuma alteração acumulada em arquivos .zip encontrada."
-            fi
-            rm -f /tmp/files_to_download.txt /tmp/recent_commits.txt 2>/dev/null
+            while IFS= read -r remote_path; do
+              [ -z "$remote_path" ] && continue
+              zipfile=$(basename "$remote_path")
+              echo "📥 Baixando do Skyflare: $zipfile"
+              curl -sL -H "Authorization: token $GH_TOKEN" "https://raw.githubusercontent.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/$UPSTREAM_SHA/$remote_path" -o /tmp/incoming_zips/"$zipfile" || \
+              curl -sL -H "Authorization: token $GH_TOKEN" "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/raw/$UPSTREAM_SHA/$remote_path" -o /tmp/incoming_zips/"$zipfile"
+            done < /tmp/files_to_download.txt
           fi
 
-      - name: Identificar Estritamente os ZIPs Modificados
+      - name: Identificar Estritamente os ZIPs Modificados (Fila Unificada)
         id: zips
         if: steps.check.outputs.changed == 'true'
         run: |
+          touch /tmp/final_changed_zips.txt
+          
+          # 1. Se foi push manual seu, pega os seus arquivos alterados
           if [ "${{ steps.check.outputs.mode }}" = "manual_push" ]; then
             BEFORE_SHA="${{ github.event.before }}"
             AFTER_SHA="${{ github.event.after }}"
-            
             if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
-              git diff-tree --no-commit-id --name-only -r "$AFTER_SHA" | grep -E '\.zip$' > /tmp/changed_zips.txt || true
+              git diff-tree --no-commit-id --name-only -r "$AFTER_SHA" | grep -E '\.zip$' >> /tmp/final_changed_zips.txt || true
             else
-              git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" | grep -E '\.zip$' > /tmp/changed_zips.txt || true
+              git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" | grep -E '\.zip$' >> /tmp/final_changed_zips.txt || true
             fi
-          else
-            mkdir -p /tmp/incoming_zips
-            find /tmp/incoming_zips -maxdepth 1 -type f -name "*.zip" -printf "%f\n" > /tmp/changed_zips.txt || true
           fi
+
+          # 2. Adiciona os arquivos do Skyflare que foram baixados para a fila (se houver)
+          if [ -d /tmp/incoming_zips ]; then
+            find /tmp/incoming_zips -maxdepth 1 -type f -name "*.zip" -printf "%f\n" >> /tmp/final_changed_zips.txt || true
+          fi
+
+          # 3. Remove duplicados (caso você e o Skyflare tenham mexido no mesmo ID)
+          sort -u /tmp/final_changed_zips.txt -o /tmp/changed_zips.txt
 
           COUNT=$(wc -l < /tmp/changed_zips.txt || echo "0")
           echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "Arquivos afetados a processar: $COUNT"
+          echo "Arquivos combinados a processar: $COUNT"
 
       - name: Modificar LUA dentro dos ZIPs Alvos
         if: steps.check.outputs.changed == 'true' && steps.zips.outputs.count != '0'
         run: |
           REPO_DIR=$(pwd)
-          MODE="${{ steps.check.outputs.mode }}"
           
           CACHE_API_STEAM="$REPO_DIR/steam_api_cache.tmp"
           touch "$CACHE_API_STEAM"
           
           while IFS= read -r zipfile; do
             [ -z "$zipfile" ] && continue
+            
+            # Remove caminhos relativos se houver
+            zipfile=$(basename "$zipfile")
 
             tmpdir=$(mktemp -d)
             HAS_LOCAL=false
@@ -183,13 +171,11 @@ jobs:
             fi
 
             mkdir -p "$tmpdir/incoming"
-            if [ "$MODE" = "manual_push" ]; then
+            # Prioriza extrair o arquivo vindo do Upstream, senão pega o seu local modificado
+            if [ -f /tmp/incoming_zips/"$zipfile" ]; then
+              unzip -q /tmp/incoming_zips/"$zipfile" -d "$tmpdir/incoming"
+            elif [ "$HAS_LOCAL" = true ]; then
               unzip -q "$REPO_DIR/$zipfile" -d "$tmpdir/incoming"
-            else
-              if [ ! -f /tmp/incoming_zips/"$zipfile" ] && [ "$HAS_LOCAL" = true ]; then
-                cp "$REPO_DIR/$zipfile" /tmp/incoming_zips/"$zipfile"
-              fi
-              [ -f /tmp/incoming_zips/"$zipfile" ] && unzip -q /tmp/incoming_zips/"$zipfile" -d "$tmpdir/incoming"
             fi
 
             if [ ! -d "$tmpdir/incoming" ] || [ -z "$(ls -A "$tmpdir/incoming" 2>/dev/null)" ]; then
@@ -207,42 +193,33 @@ jobs:
 
               REAL_GAMENAME=""
 
-              # 1. Tenta extrair a linha "Game:" original limpando o prefixo para evitar duplicidade
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "^--\s*Game:\s*" "$incoming_lua" | grep -vE "MAIN APPLICATION" | head -n 1 | sed -E 's/^--\s*Game:\s*//' | tr -d '\r')
               fi
 
-              # 2. Se falhar, tenta ler a linha comentada genérica do upstream
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|MAIN APPLICATION" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
               fi
 
-              # 3. SE FALHAR NO UPSTREAM, TENTA PEGAR DO SEU ARQUIVO LOCAL (Herança preservada)
               if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ "MAIN APPLICATION" ]]; then
                 if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                   REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" | grep -vE "provided by|MAIN APPLICATION|addappid" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
                 fi
               fi
 
-              # 4. Se ainda assim falhar, limpa do comentário do final da linha do addappid do próprio arquivo
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "addappid\(" "$incoming_lua" | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist" | head -n 1 | sed -E 's/.*--\s*//' | sed -E 's/^[Gg]ame:\s*//' | tr -d '\r')
               fi
 
-              # 5. SISTEMA DE FALLBACK INTELIGENTE COM CACHE LOCAL E APIs
               if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ ^[0-9]+$ ]] || [[ "$REAL_GAMENAME" =~ "addappid" ]] || [[ "$REAL_GAMENAME" =~ "MAIN APPLICATION" ]] || [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
-                
                 CACHED_NAME=$(grep "^${APP_ID}=" "$CACHE_API_STEAM" | cut -d'=' -f2- || echo "")
-                
                 if [ ! -z "$CACHED_NAME" ]; then
                   REAL_GAMENAME="$CACHED_NAME"
                 else
-                  echo "🌐 Consultando APIs públicas para o ID pendente: $APP_ID"
+                  echo "🌐 Consultando APIs para o ID: $APP_ID"
                   STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
-                  
                   if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
                     STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://store.steampowered.com/api/appdetails?appids=$APP_ID&filters=basic" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
-                    
                     if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
                       STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://steam-tracker.com/api?action=getAppDetails&appid=$APP_ID" | jq -r ".reply.name" 2>/dev/null || echo "")
                     fi
@@ -258,22 +235,16 @@ jobs:
                 fi
               fi
 
-              # Unificar addappid E addtoken eliminando quebras invisíveis
               grep -E "addappid\(|addtoken\(" "$incoming_lua" | tr -d '\r' > "$tmpdir/lines.tmp"
-
               if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                 grep -E "addappid\(|addtoken\(" "$local_lua" | tr -d '\r' >> "$tmpdir/lines.tmp"
               fi
 
-              # CORREÇÃO CRUCIAL: Limpa restos de comentários antigos fixados nas linhas de addappid/addtoken
               sed -i -E 's/\s*--\s*Game:\s*.*//gI' "$tmpdir/lines.tmp"
               sed -i -E 's/\s*--\s*MAIN APPLICATION.*//gI' "$tmpdir/lines.tmp"
-
               sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
 
-              # Montar o arquivo final estruturado de forma limpa
               printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
-              
               if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v -q ","; then
                 echo "-- MAIN APPLICATION" >> "$incoming_lua"
                 grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v "," >> "$incoming_lua"
@@ -300,7 +271,7 @@ jobs:
             done < <(find "$tmpdir/incoming" -type f -name "*.lua")
 
             if [ "$ANY_LUA_CHANGED" = true ] || [ "${{ inputs.full_sync }}" = "true" ]; then
-              echo "✓ [ATUALIZADO] Reestruturando cabeçalhos limpos de $zipfile..."
+              echo "✓ [PROCESSADO] Atualizando e compactando: $zipfile"
               cd "$tmpdir/incoming"
               zip -q -r "$REPO_DIR/$zipfile" .
               cd "$REPO_DIR"
@@ -313,7 +284,7 @@ jobs:
           rm -rf /tmp/incoming_zips
 
       - name: Salvar registro do último commit processado
-        if: steps.check.outputs.changed == 'true' && steps.check.outputs.mode == 'upstream_sync'
+        if: steps.check.outputs.changed == 'true' && (steps.check.outputs.mode == 'upstream_sync' || steps.check.outputs.upstream_news == 'true')
         run: |
           echo "${{ steps.check.outputs.upstream }}" > .last_sha
           echo "✓ Registro do Skyflare guardado em .last_sha."
@@ -324,20 +295,17 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if [ "${{ steps.check.outputs.mode }}" = "upstream_sync" ]; then
-            git add "*.zip" .last_sha
-          else
-            git add "*.zip"
-          fi
+          git add "*.zip"
+          if [ -f .last_sha ]; then git add .last_sha; fi
 
           STAGED=$(git diff --cached --name-only | grep -E '\.zip$|\.last_sha$' | wc -l || echo "0")
           echo "Postando total de arquivos modificados: $STAGED"
 
           if [ "$STAGED" -gt 0 ]; then
-            git commit -m "bot: patch e assinatura RyzenAPI aplicados cirurgicamente via merge"
+            git commit -m "bot: patch, assinatura RyzenAPI e sincronização mista aplicados"
             CURRENT_BRANCH=$(git branch --show-current)
             git push origin "$CURRENT_BRANCH"
-            echo "✓ Repositório atualizado com sucesso!"
+            echo "✓ Repositório atualizado!"
           else
             echo "Nenhuma mudança real pendente para commitar."
           fi
