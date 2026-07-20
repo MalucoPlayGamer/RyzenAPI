@@ -244,6 +244,17 @@ jobs:
               sed -i -E 's/\s*--\s*MAIN APPLICATION.*//gI' "$tmpdir/lines.tmp"
               sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
 
+              # --- NOVA LÓGICA RESTRITA AO LEGO BATMAN (ID 2215200) ---
+              > "$tmpdir/manifests.tmp"
+              if [ "$APP_ID" = "2215200" ]; then
+                if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
+                  grep -E "setManifestid\(" "$local_lua" | tr -d '\r' >> "$tmpdir/manifests.tmp"
+                fi
+                grep -E "setManifestid\(" "$incoming_lua" | tr -d '\r' >> "$tmpdir/manifests.tmp"
+                sort -u "$tmpdir/manifests.tmp" > "$tmpdir/manifests_clean.tmp"
+              fi
+              # --------------------------------------------------------
+
               printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
               if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v -q ","; then
                 echo "-- MAIN APPLICATION" >> "$incoming_lua"
@@ -254,6 +265,13 @@ jobs:
               if grep -q "," "$tmpdir/lines_clean.tmp"; then
                 echo "-- MAIN APP DEPOTS / PACKAGES" >> "$incoming_lua"
                 grep "," "$tmpdir/lines_clean.tmp" >> "$incoming_lua"
+                echo "" >> "$incoming_lua"
+              fi
+
+              if [ "$APP_ID" = "2215200" ] && [ -s "$tmpdir/manifests_clean.tmp" ]; then
+                echo "-- correcao voices38" >> "$incoming_lua"
+                cat "$tmpdir/manifests_clean.tmp" >> "$incoming_lua"
+                echo "" >> "$incoming_lua"
               fi
 
               sed -i 's/SkyAPI/RyzenAPI/g' "$incoming_lua"
