@@ -158,9 +158,7 @@ jobs:
           while IFS= read -r zipfile; do
             [ -z "$zipfile" ] && continue
             
-            # Remove caminhos relativos se houver
             zipfile=$(basename "$zipfile")
-
             tmpdir=$(mktemp -d)
             HAS_LOCAL=false
             
@@ -171,7 +169,6 @@ jobs:
             fi
 
             mkdir -p "$tmpdir/incoming"
-            # Prioriza extrair o arquivo vindo do Upstream, senão pega o seu local modificado
             if [ -f /tmp/incoming_zips/"$zipfile" ]; then
               unzip -q /tmp/incoming_zips/"$zipfile" -d "$tmpdir/incoming"
             elif [ "$HAS_LOCAL" = true ]; then
@@ -235,6 +232,7 @@ jobs:
                 fi
               fi
 
+              # Extrai comandos removendo o \r de forma segura
               grep -E "addappid\(|addtoken\(" "$incoming_lua" | sed 's/\r//g' > "$tmpdir/lines.tmp"
               if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                 grep -E "addappid\(|addtoken\(" "$local_lua" | sed 's/\r//g' >> "$tmpdir/lines.tmp"
@@ -244,7 +242,7 @@ jobs:
               sed -i -E 's/\s*--\s*MAIN APPLICATION.*//gI' "$tmpdir/lines.tmp"
               sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
 
-              # --- NOVA LÓGICA RESTRITA AO LEGO BATMAN (ID 2215200) ---
+              # Captura do setManifestid para o Lego Batman (2215200)
               > "$tmpdir/manifests.tmp"
               if [ "$APP_ID" = "2215200" ]; then
                 if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
@@ -253,28 +251,37 @@ jobs:
                 grep -E "setManifestid\(" "$incoming_lua" | sed 's/\r//g' >> "$tmpdir/manifests.tmp"
                 sort -u "$tmpdir/manifests.tmp" > "$tmpdir/manifests_clean.tmp"
               fi
-              # --------------------------------------------------------
 
+              # --- RECONSTRUÇÃO DO ARQUIVO FORÇANDO QUEBRA DE LINHA NATIVA ---
               printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
               
-              # Escreve a seção MAIN APPLICATION garantindo uma linha por comando
+              # Seção: MAIN APPLICATION
               if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v -q ","; then
                 echo "-- MAIN APPLICATION" >> "$incoming_lua"
-                grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v "," >> "$incoming_lua"
+                while IFS= read -r linha || [ -n "$linha" ]; do
+                  [ -z "$linha" ] && continue
+                  echo "$linha" >> "$incoming_lua"
+                done < <(grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v ",")
                 echo "" >> "$incoming_lua"
               fi
 
-              # Escreve a seção DEPOTS garantindo que cada entrada permaneça em sua própria linha separada
+              # Seção: MAIN APP DEPOTS / PACKAGES
               if grep -q "," "$tmpdir/lines_clean.tmp"; then
                 echo "-- MAIN APP DEPOTS / PACKAGES" >> "$incoming_lua"
-                grep "," "$tmpdir/lines_clean.tmp" >> "$incoming_lua"
+                while IFS= read -r linha || [ -n "$linha" ]; do
+                  [ -z "$linha" ] && continue
+                  echo "$linha" >> "$incoming_lua"
+                done < <(grep "," "$tmpdir/lines_clean.tmp")
                 echo "" >> "$incoming_lua"
               fi
 
-              # Injeta a correção de voices isolada em linhas próprias no final
+              # Seção: Correção específica Lego Batman
               if [ "$APP_ID" = "2215200" ] && [ -s "$tmpdir/manifests_clean.tmp" ]; then
                 echo "-- correcao voices38" >> "$incoming_lua"
-                cat "$tmpdir/manifests_clean.tmp" >> "$incoming_lua"
+                while IFS= read -r linha || [ -n "$linha" ]; do
+                  [ -z "$linha" ] && continue
+                  echo "$linha" >> "$incoming_lua"
+                done < "$tmpdir/manifests_clean.tmp"
                 echo "" >> "$incoming_lua"
               fi
 
