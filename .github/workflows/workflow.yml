@@ -97,15 +97,15 @@ jobs:
             COMPARE_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" \
               "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/compare/${LAST_SHA}...${UPSTREAM_SHA}")
             
-            if [ -z "$COMPARE_JSON" ] || [ "$(echo "$COMPARE_JSON" | jq -r '.status 2>/dev/null')" = "behind" ]; then
+            if [ -z "$COMPARE_JSON" ] || [ "$(echo "$COMPARE_JSON" | jq -r '.status' 2>/dev/null)" = "behind" ]; then
               echo "⚠️ Fallback: Coletando commits recentes..."
               curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits?sha=main&per_page=10" | jq -r '.[].sha' > /tmp/recent_commits.txt
               > /tmp/files_to_download.txt
               while IFS= read -r c_sha; do
-                curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/$c_sha" | jq -r '.files[] | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' >> /tmp/files_to_download.txt
+                curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/$c_sha" | jq -r '.files[]? | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' >> /tmp/files_to_download.txt
               done < /tmp/recent_commits.txt
             else
-              echo "$COMPARE_JSON" | jq -r '.files[] | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' > /tmp/files_to_download.txt
+              echo "$COMPARE_JSON" | jq -r '.files[]? | select(.status != "removed" and (.filename | endswith(".zip"))) | .filename' > /tmp/files_to_download.txt
             fi
 
             sort -u /tmp/files_to_download.txt -o /tmp/files_to_download.txt
