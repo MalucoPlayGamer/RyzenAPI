@@ -190,25 +190,30 @@ jobs:
 
               REAL_GAMENAME=""
 
+              # 1. Procura por '-- Game: Nome'
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "^--\s*Game:\s*" "$incoming_lua" | grep -vE "MAIN APPLICATION" | head -n 1 | sed -E 's/^--\s*Game:\s*//' | tr -d '\r')
               fi
 
+              # 2. Procura por comentário de cabeçalho
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|MAIN APPLICATION" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
               fi
 
+              # 3. Tenta recuperar do arquivo local se o incoming for inválido
               if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ "MAIN APPLICATION" ]]; then
                 if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                   REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" | grep -vE "provided by|MAIN APPLICATION|addappid" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
                 fi
               fi
 
+              # 4. Procura por addappid que realmente POSSUA comentário na mesma linha
               if [ -z "$REAL_GAMENAME" ]; then
-                REAL_GAMENAME=$(grep -E "addappid\(" "$incoming_lua" | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist" | head -n 1 | sed -E 's/.*--\s*//' | sed -E 's/^[Gg]ame:\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "addappid\(.*--\s*" "$incoming_lua" | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist" | head -n 1 | sed -E 's/.*--\s*//' | sed -E 's/^[Gg]ame:\s*//' | tr -d '\r')
               fi
 
-              if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ ^[0-9]+$ ]] || [[ "$REAL_GAMENAME" =~ "addappid" ]] || [[ "$REAL_GAMENAME" =~ "MAIN APPLICATION" ]] || [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
+              # 5. Validação rigorosa: Se for nulo, apenas números, comandos Lua ou contiver setManifestid -> Chama API Steam
+              if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ ^[0-9]+$ ]] || [[ "$REAL_GAMENAME" =~ "addappid" ]] || [[ "$REAL_GAMENAME" =~ "setManifestid" ]] || [[ "$REAL_GAMENAME" =~ "MAIN APPLICATION" ]] || [[ "$REAL_GAMENAME" =~ ^Depot\ [0-9]+ ]]; then
                 CACHED_NAME=$(grep "^${APP_ID}=" "$CACHE_API_STEAM" | cut -d'=' -f2- || echo "")
                 if [ ! -z "$CACHED_NAME" ]; then
                   REAL_GAMENAME="$CACHED_NAME"
@@ -242,7 +247,7 @@ jobs:
               sed -i -E 's/\s*--\s*MAIN APPLICATION.*//gI' "$tmpdir/lines.tmp"
               sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
 
-              # Captura do setManifestid para o Lego Batman (2215200)
+              # Captura do setManifestid para o Lego Batman (2215200) ou outros que precisem
               > "$tmpdir/manifests.tmp"
               if [ "$APP_ID" = "2215200" ]; then
                 if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
