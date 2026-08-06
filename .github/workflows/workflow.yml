@@ -25,10 +25,39 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
+  # JOB DE CHECAGEM: Descobre se o seu PC está ligado e com o Docker rodando
+  check-runner:
+    runs-on: ubuntu-latest
+    outputs:
+      target_runner: ${{ steps.set-runner.outputs.runner }}
+    steps:
+      - name: Checar disponibilidade do PC Local
+        id: set-runner
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Consulta os runners cadastrados no repositório via API
+          RUNNERS_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners")
+          
+          # Verifica se existe um runner com a label 'my-pc' que esteja 'online'
+          PC_ONLINE=$(echo "$RUNNERS_JSON" | jq -r '.runners[]? | select(.labels[].name == "my-pc") | select(.status == "online") | .name')
+
+          if [ ! -z "$PC_ONLINE" ]; receiver; then
+            echo "🟢 Seu PC está ONLINE! Executando no Docker local..."
+            echo "runner=self-hosted" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Seu PC está OFFLINE! Usando fallback automático: ubuntu-latest..."
+            echo "runner=ubuntu-latest" >> $GITHUB_OUTPUT
+          fi
+
+  # JOB PRINCIPAL: Executa na máquina escolhida dinamicamente
   sync-and-patch:
-    runs-on: self-hosted
+    needs: check-runner
+    runs-on: ${{ needs.check-runner.outputs.target_runner }}
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
 
     steps:
