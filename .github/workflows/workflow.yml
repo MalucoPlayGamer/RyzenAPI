@@ -28,7 +28,6 @@ permissions:
   actions: read
 
 jobs:
-  # JOB DE CHECAGEM: Descobre se o seu PC está ligado e com o Docker rodando
   check-runner:
     runs-on: ubuntu-latest
     outputs:
@@ -39,18 +38,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Consulta os runners cadastrados no repositório via API
-          RUNNERS_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" \
+          # Consulta via API com cabeçalho de API aceito pelo GitHub
+          RESPONSE=$(curl -s -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runners")
           
-          # Procura por runner com nome ou label 'MeuPC-Runner' que esteja 'online'
-          PC_ONLINE=$(echo "$RUNNERS_JSON" | jq -r '.runners[]? | select(.name == "MeuPC-Runner" or (.labels[]?.name == "MeuPC-Runner")) | select(.status == "online") | .name')
+          # Debug para verificar se a API retornou os runners corretamente no log
+          # echo "$RESPONSE"
 
-          if [ ! -z "$PC_ONLINE" ]; then
+          PC_ONLINE=$(echo "$RESPONSE" | jq -r '.runners[]? | select(.name == "MeuPC-Runner" and .status == "online") | .name')
+
+          if [ -n "$PC_ONLINE" ]; then
             echo "🟢 Seu PC ($PC_ONLINE) está ONLINE! Executando no Docker local..."
             echo "runner=self-hosted" >> $GITHUB_OUTPUT
           else
-            echo "⚠️ Seu PC está OFFLINE! Usando fallback automático: ubuntu-latest..."
+            echo "⚠️ Seu PC está OFFLINE ou inacessível via API! Usando fallback automático: ubuntu-latest..."
             echo "runner=ubuntu-latest" >> $GITHUB_OUTPUT
           fi
 
