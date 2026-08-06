@@ -351,6 +351,7 @@ jobs:
           if [ "$STAGED" -gt 0 ]; then
             git commit -m "bot: patch, assinatura RyzenAPI e sincronização mista aplicados"
             CURRENT_BRANCH=$(git branch --show-current)
+            git pull origin "$CURRENT_BRANCH" --rebase
             git push origin "$CURRENT_BRANCH"
             echo "✓ Repositório atualizado!"
           else
