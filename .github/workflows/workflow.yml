@@ -107,12 +107,12 @@ jobs:
           echo "upstream_news=$HAS_UPSTREAM_NEWS" >> $GITHUB_OUTPUT
           echo "upstream=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
 
-          if [ "$EVENT_NAME" = "push" ]; then
-            echo "Disparo: PUSH MANUAL detectado (e checaremos o upstream junto)."
+          if [ "$EVENT_NAME" = "push" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Disparo: PUSH ou DISPATCH MANUAL detectado (checando diffs locais + upstream)."
             echo "mode=manual_push" >> $GITHUB_OUTPUT
             echo "changed=true" >> $GITHUB_OUTPUT
           elif [ "$HAS_UPSTREAM_NEWS" = "true" ]; then
-            echo "✓ Nova atualização detectada no Skyflare via Cron/Manual!"
+            echo "✓ Nova atualização detectada no Skyflare via Cron!"
             echo "mode=upstream_sync" >> $GITHUB_OUTPUT
             echo "changed=true" >> $GITHUB_OUTPUT
           else
