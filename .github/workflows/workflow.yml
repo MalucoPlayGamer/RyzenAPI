@@ -42,6 +42,11 @@ jobs:
             -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runners")
 
+          # EXIBE A RESPOSTA REAL DA API NOS LOGS
+          echo "=== RETORNO DA API ==="
+          echo "$RESPONSE"
+          echo "======================="
+
           PC_ONLINE=$(echo "$RESPONSE" | jq -r '.runners[]? | select(.name == "MeuPC-Runner" and .status == "online") | .name')
 
           if [ -n "$PC_ONLINE" ]; then
