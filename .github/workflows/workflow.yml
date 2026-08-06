@@ -14,6 +14,10 @@ on:
         description: 'Forçar re-processamento de todos os ZIPs'
         type: boolean
         default: false
+      only_local_fix:
+        description: 'Corrigir e re-processar APENAS os ZIPs locais do repositório'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -37,6 +41,18 @@ jobs:
           UPSTREAM_REPO: Skyapi
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          EVENT_NAME="${{ github.event_name }}"
+          ONLY_LOCAL="${{ inputs.only_local_fix }}"
+
+          # MODO: Correção Local Exclusiva
+          if [ "$ONLY_LOCAL" = "true" ]; then
+            echo "🔧 Modo CORREÇÃO LOCAL ativado. Ignorando chamadas ao Skyflare."
+            echo "mode=local_only" >> $GITHUB_OUTPUT
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "upstream_news=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           UPSTREAM_SHA=$(curl -sf -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/main" | jq -r '.sha')
           
@@ -46,12 +62,10 @@ jobs:
           fi
 
           LAST_SHA=$(cat .last_sha 2>/dev/null || echo "")
-          EVENT_NAME="${{ github.event_name }}"
 
           echo "Último commit do Skyflare: $UPSTREAM_SHA"
           echo "Último que processamos:    $LAST_SHA"
 
-          # Sempre verifica se o Skyflare tem novidades independente do gatilho
           HAS_UPSTREAM_NEWS="false"
           if [ "$UPSTREAM_SHA" != "$LAST_SHA" ] || [ "${{ inputs.full_sync }}" = "true" ]; then
             HAS_UPSTREAM_NEWS="true"
@@ -124,8 +138,13 @@ jobs:
         run: |
           touch /tmp/final_changed_zips.txt
           
-          # 1. Se foi push manual seu, pega os seus arquivos alterados
-          if [ "${{ steps.check.outputs.mode }}" = "manual_push" ]; then
+          # 1. Se for o modo local exclusivo, pega TODOS os ZIPs do seu repositório
+          if [ "${{ steps.check.outputs.mode }}" = "local_only" ]; then
+            echo "🔍 Listando todos os arquivos .zip locais..."
+            find . -maxdepth 1 -type f -name "*.zip" -printf "%f\n" >> /tmp/final_changed_zips.txt || true
+          
+          # 2. Se foi push manual seu, pega os seus arquivos alterados
+          elif [ "${{ steps.check.outputs.mode }}" = "manual_push" ]; then
             BEFORE_SHA="${{ github.event.before }}"
             AFTER_SHA="${{ github.event.after }}"
             if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
@@ -135,12 +154,12 @@ jobs:
             fi
           fi
 
-          # 2. Adiciona os arquivos do Skyflare que foram baixados para a fila (se houver)
+          # 3. Adiciona os arquivos do Skyflare que foram baixados para a fila (se houver)
           if [ -d /tmp/incoming_zips ]; then
             find /tmp/incoming_zips -maxdepth 1 -type f -name "*.zip" -printf "%f\n" >> /tmp/final_changed_zips.txt || true
           fi
 
-          # 3. Remove duplicados (caso você e o Skyflare tenham mexido no mesmo ID)
+          # 4. Remove duplicados
           sort -u /tmp/final_changed_zips.txt -o /tmp/changed_zips.txt
 
           COUNT=$(wc -l < /tmp/changed_zips.txt || echo "0")
@@ -306,7 +325,7 @@ jobs:
               sed -i 's/SkyAPI/RyzenAPI/g' "$incoming_lua"
               sed -i 's/skyapi/ryzenapi/g' "$incoming_lua"
 
-              if [ "${{ inputs.full_sync }}" = "true" ]; then
+              if [ "${{ inputs.full_sync }}" = "true" ] || [ "${{ inputs.only_local_fix }}" = "true" ]; then
                 ANY_LUA_CHANGED=true
               elif [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                 if ! cmp -s "$incoming_lua" "$local_lua"; then
