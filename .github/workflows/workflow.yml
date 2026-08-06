@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    paths:
+      - '**.zip'
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
@@ -34,15 +36,11 @@ jobs:
       - name: Checar disponibilidade do PC Local
         id: set-runner
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_RUNNER_CHECK }}
         run: |
-          # Consulta via API com cabeçalho de API aceito pelo GitHub
           RESPONSE=$(curl -s -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runners")
-          
-          # Debug para verificar se a API retornou os runners corretamente no log
-          # echo "$RESPONSE"
 
           PC_ONLINE=$(echo "$RESPONSE" | jq -r '.runners[]? | select(.name == "MeuPC-Runner" and .status == "online") | .name')
 
