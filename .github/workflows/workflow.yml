@@ -43,11 +43,11 @@ jobs:
           RUNNERS_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runners")
           
-          # Verifica se existe um runner com a label 'my-pc' que esteja 'online'
-          PC_ONLINE=$(echo "$RUNNERS_JSON" | jq -r '.runners[]? | select(.labels[].name == "my-pc") | select(.status == "online") | .name')
+          # Procura por runner com nome ou label 'MeuPC-Runner' que esteja 'online'
+          PC_ONLINE=$(echo "$RUNNERS_JSON" | jq -r '.runners[]? | select(.name == "MeuPC-Runner" or (.labels[]?.name == "MeuPC-Runner")) | select(.status == "online") | .name')
 
-          if [ ! -z "$PC_ONLINE" ]; receiver; then
-            echo "🟢 Seu PC está ONLINE! Executando no Docker local..."
+          if [ ! -z "$PC_ONLINE" ]; then
+            echo "🟢 Seu PC ($PC_ONLINE) está ONLINE! Executando no Docker local..."
             echo "runner=self-hosted" >> $GITHUB_OUTPUT
           else
             echo "⚠️ Seu PC está OFFLINE! Usando fallback automático: ubuntu-latest..."
