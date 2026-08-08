@@ -245,14 +245,20 @@ jobs:
 
               REAL_GAMENAME=""
 
-              # 1. Procura por '-- Game: Nome'
+              # 1. Suporte Específico para Geradores Conhecidos (Luie / Hubcap)
               if [ -z "$REAL_GAMENAME" ]; then
+                # Luie: Procura no formato '-- 868360 - Nome do Jogo'
+                REAL_GAMENAME=$(grep -E "^--\s*[0-9]+\s*-\s*" "$incoming_lua" | head -n 1 | sed -E 's/^--\s*[0-9]+\s*-\s*//' | tr -d '\r')
+              fi
+
+              if [ -z "$REAL_GAMENAME" ]; then
+                # Padrão Hubcap / Padrão Geral '-- Game: Nome'
                 REAL_GAMENAME=$(grep -E "^--\s*Game:\s*" "$incoming_lua" | grep -vE "MAIN APPLICATION|setManifestid|addappid" | head -n 1 | sed -E 's/^--\s*Game:\s*//' | tr -d '\r')
               fi
 
-              # 2. Procura por comentário de cabeçalho
+              # 2. Procura por comentário de cabeçalho (ignorando marcas d'água)
               if [ -z "$REAL_GAMENAME" ]; then
-                REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|MAIN APPLICATION|setManifestid|addappid" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|MAIN APPLICATION|setManifestid|addappid|Generated with Luie|Depots \(Total" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
               fi
 
               # 3. Tenta recuperar do arquivo local se o incoming for inválido
