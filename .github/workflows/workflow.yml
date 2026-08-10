@@ -248,29 +248,29 @@ jobs:
               # 1. Suporte Específico para Geradores Conhecidos (Luie / Hubcap)
               if [ -z "$REAL_GAMENAME" ]; then
                 # Luie: Procura no formato '-- 868360 - Nome do Jogo'
-                REAL_GAMENAME=$(grep -E "^--\s*[0-9]+\s*-\s*" "$incoming_lua" | head -n 1 | sed -E 's/^--\s*[0-9]+\s*-\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "^--\s*[0-9]+\s*-\s*" "$incoming_lua" 2>/dev/null | head -n 1 | sed -E 's/^--\s*[0-9]+\s*-\s*//' | tr -d '\r')
               fi
 
               if [ -z "$REAL_GAMENAME" ]; then
                 # Padrão Hubcap / Padrão Geral '-- Game: Nome'
-                REAL_GAMENAME=$(grep -E "^--\s*Game:\s*" "$incoming_lua" | grep -vE "MAIN APPLICATION|setManifestid|addappid" | head -n 1 | sed -E 's/^--\s*Game:\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "^--\s*Game:\s*" "$incoming_lua" 2>/dev/null | grep -vE "MAIN APPLICATION|setManifestid|addappid" 2>/dev/null | head -n 1 | sed -E 's/^--\s*Game:\s*//' | tr -d '\r')
               fi
 
               # 2. Procura por comentário de cabeçalho (ignorando marcas d'água)
               if [ -z "$REAL_GAMENAME" ]; then
-                REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|MAIN APPLICATION|setManifestid|addappid|Generated with Luie|Depots \(Total" | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" 2>/dev/null | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|MAIN APPLICATION|setManifestid|addappid|Generated with Luie|Depots \(Total" 2>/dev/null | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
               fi
 
               # 3. Tenta recuperar do arquivo local se o incoming for inválido
               if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ "MAIN APPLICATION" ]] || [[ "$REAL_GAMENAME" =~ "setManifestid" ]]; then
                 if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
-                  REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" | grep -vE "provided by|MAIN APPLICATION|addappid|setManifestid" | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
+                  REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" 2>/dev/null | grep -vE "provided by|MAIN APPLICATION|addappid|setManifestid" 2>/dev/null | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
                 fi
               fi
 
               # 4. Procura por addappid que realmente POSSUA comentário na mesma linha
               if [ -z "$REAL_GAMENAME" ]; then
-                REAL_GAMENAME=$(grep -E "addappid\(.*--\s*" "$incoming_lua" | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist|setManifestid" | head -n 1 | sed -E 's/.*--\s*//' | sed -E 's/^[Gg]ame:\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "addappid\(.*--\s*" "$incoming_lua" 2>/dev/null | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist|setManifestid" 2>/dev/null | head -n 1 | sed -E 's/.*--\s*//' | sed -E 's/^[Gg]ame:\s*//' | tr -d '\r')
               fi
 
               # 5. FILTRO DE SEGURANÇA SEVERO:
@@ -288,7 +288,7 @@ jobs:
 
               # 6. Consulta APIs da Steam se não conseguiu um nome limpo
               if [ -z "$REAL_GAMENAME" ]; then
-                CACHED_NAME=$(grep "^${APP_ID}=" "$CACHE_API_STEAM" | cut -d'=' -f2- || echo "")
+                CACHED_NAME=$(grep "^${APP_ID}=" "$CACHE_API_STEAM" 2>/dev/null | cut -d'=' -f2- || echo "")
                 if [ ! -z "$CACHED_NAME" ]; then
                   REAL_GAMENAME="$CACHED_NAME"
                 else
@@ -312,9 +312,9 @@ jobs:
               fi
 
               # Extrai comandos removendo o \r de forma segura
-              grep -E "addappid\(|addtoken\(" "$incoming_lua" | sed 's/\r//g' > "$tmpdir/lines.tmp"
+              grep -E "addappid\(|addtoken\(" "$incoming_lua" 2>/dev/null | sed 's/\r//g' > "$tmpdir/lines.tmp"
               if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
-                grep -E "addappid\(|addtoken\(" "$local_lua" | sed 's/\r//g' >> "$tmpdir/lines.tmp"
+                grep -E "addappid\(|addtoken\(" "$local_lua" 2>/dev/null | sed 's/\r//g' >> "$tmpdir/lines.tmp"
               fi
 
               sed -i -E 's/\s*--\s*Game:\s*.*//gI' "$tmpdir/lines.tmp"
@@ -325,9 +325,9 @@ jobs:
               > "$tmpdir/manifests.tmp"
               if [ "$APP_ID" = "2215200" ] || [ "$APP_ID" = "3357650" ] || [ "$APP_ID" = "3321460" ] || [ "$APP_ID" = "3159330" ] || [ "$APP_ID" = "2680010" ]; then
                 if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
-                  grep -E "setManifestid\(" "$local_lua" | sed 's/\r//g' >> "$tmpdir/manifests.tmp"
+                  grep -E "setManifestid\(" "$local_lua" 2>/dev/null | sed 's/\r//g' >> "$tmpdir/manifests.tmp"
                 fi
-                grep -E "setManifestid\(" "$incoming_lua" | sed 's/\r//g' >> "$tmpdir/manifests.tmp"
+                grep -E "setManifestid\(" "$incoming_lua" 2>/dev/null | sed 's/\r//g' >> "$tmpdir/manifests.tmp"
                 sort -u "$tmpdir/manifests.tmp" > "$tmpdir/manifests_clean.tmp"
               fi
 
@@ -335,22 +335,22 @@ jobs:
               printf -- "-- Lua provided by RyzenAPI\n-- Game: %s\n\n" "$REAL_GAMENAME" > "$incoming_lua"
               
               # Seção: MAIN APPLICATION
-              if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v -q ","; then
+              if grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" 2>/dev/null | grep -v -q ","; then
                 echo "-- MAIN APPLICATION" >> "$incoming_lua"
                 while IFS= read -r linha || [ -n "$linha" ]; do
                   [ -z "$linha" ] && continue
                   echo "$linha" >> "$incoming_lua"
-                done < <(grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" | grep -v ",")
+                done < <(grep -E "addappid\([0-9]+\)$|addappid\([0-9]+\) --" "$tmpdir/lines_clean.tmp" 2>/dev/null | grep -v ",")
                 echo "" >> "$incoming_lua"
               fi
 
               # Seção: MAIN APP DEPOTS / PACKAGES
-              if grep -q "," "$tmpdir/lines_clean.tmp"; then
+              if grep -q "," "$tmpdir/lines_clean.tmp" 2>/dev/null; then
                 echo "-- MAIN APP DEPOTS / PACKAGES" >> "$incoming_lua"
                 while IFS= read -r linha || [ -n "$linha" ]; do
                   [ -z "$linha" ] && continue
                   echo "$linha" >> "$incoming_lua"
-                done < <(grep "," "$tmpdir/lines_clean.tmp")
+                done < <(grep "," "$tmpdir/lines_clean.tmp" 2>/dev/null)
                 echo "" >> "$incoming_lua"
               fi
 
