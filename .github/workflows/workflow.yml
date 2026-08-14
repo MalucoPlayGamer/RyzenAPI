@@ -293,14 +293,26 @@ jobs:
                   REAL_GAMENAME="$CACHED_NAME"
                 else
                   echo "🌐 Consultando APIs para o ID: $APP_ID"
-                  STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
+                  
+                  # --- PRIMÁRIA: API SteamCMD Net ---
+                  STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://api.steamcmd.net/v1/info/$APP_ID" | jq -r ".data[\"$APP_ID\"].common.name" 2>/dev/null || echo "")
+
+                  # --- FALLBACK 1: API Oficial Steam Store ---
                   if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
-                    STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://store.steampowered.com/api/appdetails?appids=$APP_ID&filters=basic" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
-                    if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
-                      STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://steam-tracker.com/api?action=getAppDetails&appid=$APP_ID" | jq -r ".reply.name" 2>/dev/null || echo "")
-                    fi
+                    STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
                   fi
 
+                  # --- FALLBACK 2: API Oficial Steam Store (Filtro Básico) ---
+                  if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
+                    STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://store.steampowered.com/api/appdetails?appids=$APP_ID&filters=basic" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
+                  fi
+
+                  # --- FALLBACK 3: Steam Tracker ---
+                  if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
+                    STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://steam-tracker.com/api?action=getAppDetails&appid=$APP_ID" | jq -r ".reply.name" 2>/dev/null || echo "")
+                  fi
+
+                  # Validação e Cache do Nome do Jogo
                   if [ ! -z "$STEAM_NAME" ] && [ "$STEAM_NAME" != "null" ]; then
                     REAL_GAMENAME="$STEAM_NAME"
                     echo "${APP_ID}=${REAL_GAMENAME}" >> "$CACHE_API_STEAM"
