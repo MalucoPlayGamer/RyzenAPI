@@ -323,14 +323,20 @@ jobs:
                 fi
               fi
 
-              # Extrai comandos removendo o \r de forma segura
+              # 1. Extrai comandos de ambos os arquivos
               grep -E "addappid\(|addtoken\(" "$incoming_lua" 2>/dev/null | sed 's/\r//g' > "$tmpdir/lines.tmp"
               if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                 grep -E "addappid\(|addtoken\(" "$local_lua" 2>/dev/null | sed 's/\r//g' >> "$tmpdir/lines.tmp"
               fi
 
+              # 2. Limpa marcas/comentários desnecessários
               sed -i -E 's/\s*--\s*Game:\s*.*//gI' "$tmpdir/lines.tmp"
               sed -i -E 's/\s*--\s*MAIN APPLICATION.*//gI' "$tmpdir/lines.tmp"
+
+              # 3. NOVO: Remove espaços em branco do FINAL de cada linha para o sort -u não falhar
+              sed -i -E 's/[[:space:]]+$//' "$tmpdir/lines.tmp"
+
+              # 4. Ordena e garante remoção estrita de duplicatas
               sort -u "$tmpdir/lines.tmp" | sort -V > "$tmpdir/lines_clean.tmp"
 
               # Captura do setManifestid para o Lego Batman (2215200) ou outros
