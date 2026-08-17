@@ -294,26 +294,26 @@ jobs:
                 else
                   echo "🌐 Consultando APIs para o ID: $APP_ID"
                   
-                  # --- PRIMÁRIA: API SteamCMD Net ---
-                  STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://api.steamcmd.net/v1/info/$APP_ID" | jq -r ".data[\"$APP_ID\"].common.name" 2>/dev/null || echo "")
+                  # --- 1. PRIMÁRIA: API SteamCMD Net ---
+                  STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://api.steamcmd.net/v1/info/$APP_ID" | jq -r ".data[\"$APP_ID\"].common.name // .data[\"$APP_ID\"].config.installdir // .data[\"$APP_ID\"].extended.gamedir" 2>/dev/null || echo "")
 
-                  # --- FALLBACK 1: API Oficial Steam Store ---
-                  if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
-                    STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
-                  fi
-
-                  # --- FALLBACK 2: API Oficial Steam Store (Filtro Básico) ---
+                  # --- 2. FALLBACK: Steam Store (Leve com filters=basic) ---
                   if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
                     STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://store.steampowered.com/api/appdetails?appids=$APP_ID&filters=basic" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
                   fi
 
-                  # --- FALLBACK 3: Steam Tracker ---
+                  # --- 3. FALLBACK: SteamStore Completa (Caso o basic falhe por algum erro pontual) ---
                   if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
-                    STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://steam-tracker.com/api?action=getAppDetails&appid=$APP_ID" | jq -r ".reply.name" 2>/dev/null || echo "")
+                    STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://store.steampowered.com/api/appdetails?appids=$APP_ID" | jq -r ".\"$APP_ID\".data.name" 2>/dev/null || echo "")
+                  fi
+
+                  # --- 4. FALLBACK: SteamSpy API (Pega delisted, banidos, NSFW e DLCs) ---
+                  if [ -z "$STEAM_NAME" ] || [ "$STEAM_NAME" = "null" ]; then
+                    STEAM_NAME=$(curl -s --connect-timeout 4 --max-time 8 "https://steamspy.com/api.php?request=appdetails&appid=$APP_ID" | jq -r ".name" 2>/dev/null || echo "")
                   fi
 
                   # Validação e Cache do Nome do Jogo
-                  if [ ! -z "$STEAM_NAME" ] && [ "$STEAM_NAME" != "null" ]; then
+                  if [ ! -z "$STEAM_NAME" ] && [ "$STEAM_NAME" != "null" ] && [ "$STEAM_NAME" != "0" ]; then
                     REAL_GAMENAME="$STEAM_NAME"
                     echo "${APP_ID}=${REAL_GAMENAME}" >> "$CACHE_API_STEAM"
                   else
