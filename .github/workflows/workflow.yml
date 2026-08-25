@@ -245,33 +245,37 @@ jobs:
 
               REAL_GAMENAME=""
 
-              # 1. Suporte Específico para Geradores Conhecidos (Luie / Hubcap)
+              # 1. Suporte Específico para Geradores Conhecidos (Luie / Hubcap / Skyflare com 'Game :')
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "^--\s*[0-9]+\s*-\s*" "$incoming_lua" 2>/dev/null | head -n 1 | sed -E 's/^--\s*[0-9]+\s*-\s*//' | tr -d '\r')
               fi
 
+              # 2. Captura "Game:" ou "Game :" independente de maiúsculas/minúsculas (insensível a case)
               if [ -z "$REAL_GAMENAME" ]; then
-                REAL_GAMENAME=$(grep -E "^--\s*Game:\s*" "$incoming_lua" 2>/dev/null | grep -vE "MAIN APPLICATION|setManifestid|addappid" 2>/dev/null | head -n 1 | sed -E 's/^--\s*Game:\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -iE "^--\s*Game\s*:\s*" "$incoming_lua" 2>/dev/null | grep -vE "MAIN APPLICATION|setManifestid|addappid" 2>/dev/null | head -n 1 | sed -E 's/^--\s*[Gg][Aa][Mm][Ee]\s*:\s*//' | tr -d '\r')
               fi
 
-              # 2. Procura por comentário de cabeçalho
+              # 3. Procura por comentário de cabeçalho genérico
               if [ -z "$REAL_GAMENAME" ]; then
                 REAL_GAMENAME=$(grep -E "^-- [A-Za-z0-9]" "$incoming_lua" 2>/dev/null | grep -vE "Lua and Manifest|Created by|Website:|Total Depots:|provided by|MAIN APPLICATION|setManifestid|addappid|Generated with Luie|Depots \(Total" 2>/dev/null | head -n 1 | sed -E 's/^--\s*//' | tr -d '\r')
               fi
 
-              # 3. Tenta recuperar do arquivo local se o incoming for inválido
+              # 4. Tenta recuperar do arquivo local se o incoming for inválido
               if [ -z "$REAL_GAMENAME" ] || [[ "$REAL_GAMENAME" =~ "MAIN APPLICATION" ]] || [[ "$REAL_GAMENAME" =~ "setManifestid" ]]; then
                 if [ "$HAS_LOCAL" = true ] && [ -f "$local_lua" ]; then
                   REAL_GAMENAME=$(grep -E "addappid\(.*\)\s*--" "$local_lua" 2>/dev/null | grep -vE "provided by|MAIN APPLICATION|addappid|setManifestid" 2>/dev/null | head -n 1 | sed -E 's/.*--\s*//' | tr -d '\r')
                 fi
               fi
 
-              # 4. Procura por addappid que realmente POSSUA comentário na mesma linha
+              # 5. Procura por addappid que realmente POSSUA comentário na mesma linha
               if [ -z "$REAL_GAMENAME" ]; then
-                REAL_GAMENAME=$(grep -E "addappid\(.*--\s*" "$incoming_lua" 2>/dev/null | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist|setManifestid" 2>/dev/null | head -n 1 | sed -E 's/.*--\s*//' | sed -E 's/^[Gg]ame:\s*//' | tr -d '\r')
+                REAL_GAMENAME=$(grep -E "addappid\(.*--\s*" "$incoming_lua" 2>/dev/null | grep -vE "Depot|Content|Upgrade|Edition|Pack|Redist|setManifestid" 2>/dev/null | head -n 1 | sed -E 's/.*--\s*//' | sed -E 's/^[Gg][Aa][Mm][Ee]\s*:\s*//' | tr -d '\r')
               fi
 
-              # 5. FILTRO DE SEGURANÇA SEVERO
+              # 6. LIMPEZA FINAL DO NOME (Remove qualquer 'Game :' ou 'game :' residual do início)
+              REAL_GAMENAME=$(echo "$REAL_GAMENAME" | sed -E 's/^[Gg][Aa][Mm][Ee]\s*:\s*//' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+
+              # 7. FILTRO DE SEGURANÇA SEVERO
               if [ -z "$REAL_GAMENAME" ] || \
                  [[ "$REAL_GAMENAME" =~ ^[0-9]+$ ]] || \
                  [[ "$REAL_GAMENAME" =~ "addappid" ]] || \
